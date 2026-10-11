@@ -1,0 +1,650 @@
+#[cfg(not(unix))]
+compile_error!("taskman needs macOS or Linux (use WSL on Windows)");
+
+mod add;
+mod app;
+mod cli;
+mod close;
+mod github;
+mod github_issues;
+mod hook;
+mod jira;
+mod keys;
+mod linear;
+mod links;
+mod local;
+mod proc;
+#[cfg(test)]
+mod replay;
+mod resume;
+mod selection;
+mod session;
+mod session_ids;
+mod stack;
+mod status;
+mod store;
+mod tracker;
+mod ui;
+mod untrusted;
+mod update;
+mod util;
+mod worktree;
+
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
+use crossterm::execute;
+use crossterm::terminal::EnterAlternateScreen;
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+use std::io::Write;
+use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
+/// Whether `take_terminal` pushed the kitty keyboard flags, for the panic hook to pop them.
+static ENHANCED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the loop has ended and `shutdown` runs, which may wait for git: the watchdog gives it
+/// that long.
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// How long the terminal must stay gone before the watchdog ends taskman. The loop notices within
+/// 16ms and stopping the sessions takes a fraction of a second, so this is only reached when
+/// something hangs.
+const GRACE: Duration = Duration::from_secs(3);
+
+/// How long a quit nobody watches, after a signal or with the terminal gone, waits for a worktree
+/// still being created or removed (`App::may_quit`) before it ends anyway. `prefix q` waits as
+/// long as it takes, and says so on screen.
+const QUIT_WAIT: Duration = Duration::from_secs(30);
+
+/// How long after a second SIGTERM or SIGHUP the watchdog ends taskman if it's still running: the
+/// shutdown ends within a moment of it, so this is only reached when the loop is stuck.
+const SECOND_SIGNAL: Duration = Duration::from_secs(1);
+
+/// Signals that end the TUI the way `ctrl+a q` does (see `shutdown`).
+struct Signals {
+    /// How many SIGTERMs and SIGHUPs (the terminal closed) have come. The first quits as `prefix q`
+    /// does; a second ends the shutdown's wait, and the watchdog ends the process `SECOND_SIGNAL`
+    /// after it in case the loop is stuck.
+    stops: Arc<AtomicUsize>,
+    /// How many SIGINTs. Only `kill -INT` sends it while the terminal is raw; ctrl+c in an editor
+    /// that waits in cooked mode (`code --wait`) sends it too, so it's cleared when the editor
+    /// returns.
+    interrupts: Arc<AtomicUsize>,
+    /// SIGHUP alone, for the watchdog.
+    hangup: Arc<AtomicBool>,
+}
+
+impl Signals {
+    fn register() -> std::io::Result<Self> {
+        let s = Self { stops: Arc::default(), interrupts: Arc::default(), hangup: Arc::default() };
+        for (sig, count) in [(SIGTERM, &s.stops), (SIGHUP, &s.stops), (SIGINT, &s.interrupts)] {
+            let count = count.clone();
+            // SAFETY: the handler only adds to an atomic, which is async-signal-safe.
+            unsafe {
+                signal_hook::low_level::register(sig, move || {
+                    count.fetch_add(1, Ordering::Relaxed);
+                })?;
+            }
+        }
+        signal_hook::flag::register(SIGHUP, s.hangup.clone())?;
+        Ok(s)
+    }
+
+    /// Whether a signal has asked taskman to quit.
+    fn received(&self) -> bool {
+        self.stops.load(Ordering::Relaxed) > 0 || self.interrupts.load(Ordering::Relaxed) > 0
+    }
+
+    /// Whether a second signal has come: the shutdown stops waiting for git and ends.
+    fn again(&self) -> bool {
+        self.stops.load(Ordering::Relaxed) + self.interrupts.load(Ordering::Relaxed) >= 2
+    }
+}
+
+/// The terminal's input, the file crossterm reads keys from. When the terminal goes away (a closed
+/// window, `tmux kill-server`, a dropped SSH connection), reading it gives end of file, and
+/// crossterm 0.29 retries that forever inside `event::poll`: the loop never sees the SIGHUP and
+/// spins. So `run` waits for input here and hands it to crossterm only while the terminal is there.
+/// crossterm can still spin when the terminal goes while it's part-way through a key, mouse report
+/// or paste, since it reads on until the sequence ends: `watchdog` ends taskman then.
+struct Tty {
+    fd: RawFd,
+    /// The file `fd` belongs to when it isn't stdin: `/dev/tty`, or the watchdog's copy.
+    _file: Option<std::fs::File>,
+}
+
+#[derive(Debug, PartialEq)]
+enum Input {
+    Ready,
+    Idle,
+    Gone,
+}
+
+impl Tty {
+    /// The file crossterm picks: stdin if it's a terminal, else `/dev/tty`.
+    fn open() -> std::io::Result<Self> {
+        // SAFETY: isatty only looks at a descriptor number; it reads or writes no memory.
+        if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
+            return Ok(Self { fd: libc::STDIN_FILENO, _file: None });
+        }
+        let f = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty")?;
+        Ok(Self { fd: f.as_raw_fd(), _file: Some(f) })
+    }
+
+    fn try_clone(&self) -> std::io::Result<Self> {
+        // SAFETY: `fd` is stdin or `_file`'s, open while `self` is, and the borrow ends with the
+        // clone.
+        let f =
+            std::fs::File::from(unsafe { BorrowedFd::borrow_raw(self.fd) }.try_clone_to_owned()?);
+        Ok(Self { fd: f.as_raw_fd(), _file: Some(f) })
+    }
+
+    /// Waits up to `timeout` for input. Through `filedescriptor::poll`, which uses select on
+    /// macOS, where poll doesn't work on terminals.
+    fn wait(&self, timeout: Duration) -> Input {
+        let mut fds = [libc::pollfd { fd: self.fd, events: libc::POLLIN, revents: 0 }];
+        match filedescriptor::poll(&mut fds, Some(timeout)) {
+            // An error is a signal arriving; the caller checks for those.
+            Ok(0) | Err(_) => return Input::Idle,
+            Ok(_) => {}
+        }
+        if fds[0].revents & (libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Input::Gone;
+        }
+        // Readable with nothing to read is the end of file; select on macOS reports no hangup.
+        let mut n: libc::c_int = 0;
+        // SAFETY: FIONREAD writes one c_int, into `n`, which outlives the call.
+        if unsafe { libc::ioctl(self.fd, libc::FIONREAD, &mut n) } != 0 || n == 0 {
+            return Input::Gone;
+        }
+        Input::Ready
+    }
+}
+
+/// Ends taskman when the terminal has been gone for `GRACE` and it's still running: the loop is
+/// stuck, most likely in crossterm (see `Tty`). On its own thread, as the loop can't be relied on.
+/// Once `shutdown` runs, it may be waiting for git, and gets `QUIT_WAIT` more. A second SIGTERM
+/// or SIGHUP ends taskman the same way, `SECOND_SIGNAL` later, if the shutdown hasn't. The
+/// sessions' ptys close with the process, which hangs up their CLIs.
+fn watchdog(tty: Tty, hangup: Arc<AtomicBool>, stops: Arc<AtomicUsize>) -> std::io::Result<()> {
+    std::thread::Builder::new().name("watchdog".into()).spawn(move || {
+        let (mut gone, mut again) = (Gone::default(), Gone::default());
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            let now = Instant::now();
+            // A SIGHUP that isn't the terminal closing ends the loop too.
+            let left = hangup.load(Ordering::Relaxed) || tty.wait(Duration::ZERO) == Input::Gone;
+            let grace =
+                if SHUTTING_DOWN.load(Ordering::Relaxed) { GRACE + QUIT_WAIT } else { GRACE };
+            let second = stops.load(Ordering::Relaxed) >= 2;
+            if gone.for_at_least(left, now, grace) || again.for_at_least(second, now, SECOND_SIGNAL)
+            {
+                add::stopped();
+                // SAFETY: _exit ends the process without running destructors or touching memory.
+                unsafe { libc::_exit(1) };
+            }
+        }
+    })?;
+    Ok(())
+}
+
+/// How long the terminal has looked gone. Each check must find it gone: on macOS, input another
+/// thread reads between `Tty::wait`'s select and its byte count looks like the end of file once.
+#[derive(Default)]
+struct Gone(Option<Instant>);
+
+impl Gone {
+    fn for_at_least(&mut self, gone: bool, now: Instant, grace: Duration) -> bool {
+        if !gone {
+            self.0 = None;
+            return false;
+        }
+        now.duration_since(*self.0.get_or_insert(now)) >= grace
+    }
+}
+
+fn main() -> anyhow::Result<()> {
+    let Some(args) =
+        std::env::args_os().map(|a| a.into_string().ok()).collect::<Option<Vec<String>>>()
+    else {
+        eprintln!("taskman: arguments must be valid UTF-8");
+        std::process::exit(2);
+    };
+    // Hints in every command name the prefix; a hook prints none and runs often.
+    if args.get(1).is_none_or(|a| a != "hook")
+        && let Ok(config) = store::load_config()
+    {
+        keys::set_prefix(config.prefix);
+    }
+    match args.get(1).map(String::as_str) {
+        Some("hook") => {
+            hook::run(args.get(2).map(String::as_str).unwrap_or("idle"));
+            return Ok(());
+        }
+        Some("status") => std::process::exit(status::run(&args[2..])),
+        Some("add") => std::process::exit(add::run(&args[2..])),
+        Some("close") => std::process::exit(close::run(&args[2..])),
+        Some("move") => std::process::exit(local::run(&args[2..])),
+        Some("resume") => std::process::exit(resume::run(&args[2..])),
+        Some("update") => {
+            let force = args.iter().skip(2).any(|a| a == "--force");
+            if let Err(e) = update::run(force) {
+                eprintln!("taskman update: {e}");
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Some("-V" | "--version") => {
+            println!("taskman {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        // The notices of the crates built into the binary, which the install script and
+        // `taskman update` don't put beside it as the archives do. `write_all`, as `print!` would
+        // panic when a pager closes the pipe early.
+        Some("--licenses") => {
+            let _ = std::io::stdout().write_all(include_str!("../LICENSE-THIRD-PARTY").as_bytes());
+            return Ok(());
+        }
+        Some("-h" | "--help") => {
+            println!(
+                "taskman {}: several tickets at once, each with its session (Claude or Codex),",
+                env!("CARGO_PKG_VERSION")
+            );
+            println!(
+                "tracker issue (Jira, Linear or a local file) and GitHub PR, grouped by project.\n"
+            );
+            println!(
+                "Usage: taskman              start the TUI ({} shows the command keys)",
+                keys::prefix()
+            );
+            println!(
+                "       taskman status [KEY] a ticket's issue, worktree and PR, fetched fresh; without KEY,"
+            );
+            println!(
+                "                            the ticket or project of the current folder, else every"
+            );
+            println!(
+                "                            project (--project NAME, --json; --help for more)"
+            );
+            println!(
+                "       taskman add KEY...   add tickets to taskman without switching to them, with the"
+            );
+            println!(
+                "                            project's defaults; queued if taskman isn't running"
+            );
+            println!(
+                "                            (--agent NAME, --codex, --no-worktree; --help for more)"
+            );
+            println!(
+                "       taskman close KEY... close tickets, removing a worktree only if nothing would be lost;"
+            );
+            println!(
+                "                            queued if taskman isn't running (--merged, --keep-worktree,"
+            );
+            println!("                            --agent NAME; --help for more)");
+            println!(
+                "       taskman move KEY COLUMN  move a Local files ticket to another column of the board in"
+            );
+            println!("                            its project folder (--help for more)");
+            println!(
+                "       taskman resume KEY   continue a ticket's or agent's session in this terminal, as"
+            );
+            println!(
+                "                            taskman starts it; hand it off there first with {} t",
+                keys::prefix()
+            );
+            println!(
+                "                            (--project NAME, --ticket, --agent; --help for more)"
+            );
+            println!(
+                "       taskman update       install the latest release (--force reinstalls it)"
+            );
+            println!("       taskman --version    print the version");
+            println!(
+                "       taskman --licenses   print the licenses of the third-party code in the binary"
+            );
+            println!(
+                "       taskman hook STATE   used by the Claude Code and Codex hooks taskman adds\n"
+            );
+            println!(
+                "Set up projects and accounts inside taskman: {} , opens Settings.\n",
+                keys::prefix()
+            );
+            println!("Environment: TASKMAN_CLAUDE  the claude command to run (default: claude)");
+            println!("             TASKMAN_CODEX   the codex command to run (default: codex)");
+            println!("             TASKMAN_CONFIG  another accounts file");
+            println!("             TASKMAN_NO_AUTOUPDATE=1  don't check for updates or show them");
+            println!("             XDG_STATE_HOME, XDG_CONFIG_HOME  move state and config\n");
+            println!("State:  {}", store::state_dir().display());
+            println!("Config: {}", store::config_path().display());
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let exe = std::env::current_exe()?;
+    // Before the alternate screen, so these stay on the terminal.
+    let (_lock, saved, config) = match open_state() {
+        Ok(state) => state,
+        Err(e) => {
+            eprintln!("taskman: {e}");
+            std::process::exit(1);
+        }
+    };
+    let mut app = app::App::new(&exe, saved, config);
+    app.check_prefix_tip();
+    let signals = Signals::register()?;
+    let tty = Tty::open()?;
+    watchdog(tty.try_clone()?, signals.hangup.clone(), signals.stops.clone())?;
+    set_panic_hook();
+
+    // Under NO_COLOR crossterm 0.29 writes each colour as `ESC[m`, a reset that also clears bold
+    // and reverse (the selection); fixed on its master, not yet released. taskman drops the colours
+    // itself instead (`ui::drop_colours`).
+    crossterm::style::force_color_output(true);
+    // Raw mode first: the keyboard query reads the terminal's answer.
+    crossterm::terminal::enable_raw_mode()?;
+    let enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    ENHANCED.store(enhanced, Ordering::Relaxed);
+    let result = take_terminal(enhanced).map_err(anyhow::Error::from).and_then(|()| {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(
+            links::Runs::new(std::io::stdout()),
+        ))?;
+        let result = run(&mut terminal, &mut app, enhanced, &signals, &tty);
+        if tty.wait(Duration::ZERO) == Input::Gone {
+            detach_output();
+            // A draw that failed was only how the loop found out (first, on macOS): quit as on
+            // prefix q.
+            return Ok(());
+        }
+        result
+    });
+
+    release_terminal(enhanced);
+    shutdown(app, &signals);
+    result
+}
+
+/// Ends taskman as `prefix q` does, however the loop ended (the quit dialog, a signal, the
+/// terminal gone): commands queue from now on, the state is saved, the sessions stop, and a
+/// worktree still being created or removed gets up to `QUIT_WAIT` to finish, less when a second
+/// signal comes. After `prefix q` the loop has already waited (`App::may_quit`), on screen.
+fn shutdown(mut app: app::App, signals: &Signals) {
+    SHUTTING_DOWN.store(true, Ordering::Relaxed);
+    add::stopped();
+    app.request_quit();
+    app.stop_sessions();
+    let until = Instant::now() + QUIT_WAIT;
+    let mut said = false;
+    while !app.may_quit() && Instant::now() < until && !signals.again() {
+        // `may_quit`'s toast says what it waits for; the terminal is the shell's again.
+        if !std::mem::replace(&mut said, true)
+            && let Some((what, _)) = &app.toast
+        {
+            let _ = writeln!(std::io::stdout(), "taskman: {what}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        app.drain_messages();
+    }
+}
+
+/// Points stdout and stderr at /dev/null once the terminal is gone. Writing to it fails, and
+/// `eprintln!` panics on that: ratatui's `Terminal` uses it when it can't show the cursor as it's
+/// dropped, as does returning an error from `main`. That panic would end taskman before it stops
+/// the sessions.
+fn detach_output() {
+    if let Ok(null) = std::fs::OpenOptions::new().write(true).open("/dev/null") {
+        for fd in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+            // SAFETY: dup2 on descriptors this process owns; it reads or writes no memory.
+            unsafe { libc::dup2(null.as_raw_fd(), fd) };
+        }
+    }
+}
+
+/// Takes the state folder's lock and reads the saved state and config. Fails rather than start
+/// with less than was saved, since the first save would write that over the files.
+fn open_state() -> Result<(store::Lock, store::Saved, store::Config), String> {
+    let lock = store::lock()?;
+    if let Some(dir) = store::own_config_dir().filter(|d| d.exists()) {
+        let _ = store::private_dir(&dir);
+    }
+    // A release from before the lock doesn't take it, but it keeps the inbox's `alive` file fresh.
+    if add::running_elsewhere() {
+        return Err(store::already_running(&store::state_dir(), ""));
+    }
+    Ok((lock, store::load()?, store::load_config()?))
+}
+
+/// Restores the terminal on a panic of the main thread, which ends the TUI. Other threads (a
+/// session's reader, a fetch) leave it alone, as the TUI goes on; their message would land in the
+/// middle of the screen, so it goes to `panics.log` in the state folder instead.
+fn set_panic_hook() {
+    let main_thread = std::thread::current().id();
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().id() == main_thread {
+            release_terminal(ENHANCED.load(Ordering::Relaxed));
+            hook(info);
+            return;
+        }
+        let thread = std::thread::current();
+        let mut entry =
+            format!("{} thread '{}' {info}\n", util::now(), thread.name().unwrap_or("<unnamed>"));
+        let trace = std::backtrace::Backtrace::capture();
+        if trace.status() == std::backtrace::BacktraceStatus::Captured {
+            entry.push_str(&format!("{trace}\n"));
+        }
+        let dir = store::state_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut f) =
+            std::fs::OpenOptions::new().create(true).append(true).open(dir.join("panics.log"))
+        {
+            let _ = f.write_all(entry.as_bytes());
+        }
+    }));
+}
+
+/// The terminal, its output sending each link once per run of cells (see `links::Runs`).
+type Term = ratatui::Terminal<ratatui::backend::CrosstermBackend<links::Runs<std::io::Stdout>>>;
+
+fn run(
+    terminal: &mut Term,
+    app: &mut app::App,
+    enhanced: bool,
+    signals: &Signals,
+    tty: &Tty,
+) -> anyhow::Result<()> {
+    let mut last_draw =
+        Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now);
+    // Keys typed during the keyboard query wait in crossterm's queue, not on the terminal.
+    let mut input = true;
+    let mut last_size = ratatui::layout::Size::default();
+    let no_color = no_color();
+    loop {
+        let size = terminal.size()?;
+        app.tick(ratatui::layout::Rect::new(0, 0, size.width, size.height));
+        // crossterm reports resizes only along with input now, so they are noticed here.
+        if size != std::mem::replace(&mut last_size, size) {
+            app.dirty.store(true, Ordering::Relaxed);
+        }
+
+        // Redraw on output, input, or at 10fps for spinners and clocks.
+        if app.dirty.swap(false, Ordering::Relaxed)
+            || last_draw.elapsed() >= Duration::from_millis(100)
+        {
+            terminal.draw(|f| {
+                ui::draw(f, app);
+                if no_color {
+                    ui::drop_colours(f.buffer_mut());
+                }
+            })?;
+            last_draw = Instant::now();
+            let mut out = std::io::stdout();
+            for data in app.clipboard_out.drain(..) {
+                let _ = write!(out, "\x1b]52;c;{data}\x07");
+            }
+            if std::mem::take(&mut app.bell) {
+                let _ = write!(out, "\x07");
+            }
+            let _ = out.flush();
+        }
+
+        match tty.wait(Duration::from_millis(16)) {
+            // The terminal is gone, as with SIGHUP: stop the sessions and end.
+            Input::Gone => return Ok(()),
+            Input::Ready => input = true,
+            Input::Idle => {}
+        }
+        if std::mem::take(&mut input) && event::poll(Duration::ZERO)? {
+            loop {
+                match event::read()? {
+                    Event::Key(k) => app.on_key(keys::normalize(k)),
+                    Event::Paste(s) => app.on_paste(&s),
+                    Event::Mouse(m) => app.on_mouse(m),
+                    Event::Resize(..) => {}
+                    _ => {}
+                }
+                if !event::poll(Duration::ZERO)? {
+                    break;
+                }
+            }
+            app.dirty.store(true, Ordering::Relaxed);
+        }
+        if let Some(path) = app.edit.take() {
+            if let Err(e) = edit(terminal, &path, enhanced) {
+                app.toast(e);
+            }
+            signals.interrupts.store(0, Ordering::Relaxed);
+            app.dirty.store(true, Ordering::Relaxed);
+        }
+        if app.may_quit() || signals.received() {
+            return Ok(());
+        }
+    }
+}
+
+/// Whether NO_COLOR asks for no colours: set and not empty, as no-color.org says.
+fn no_color() -> bool {
+    std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty())
+}
+
+/// Puts the terminal in the TUI's mode: raw, on the alternate screen, with mouse reports, bracketed
+/// paste and, where the terminal has them, the kitty keyboard flags. At start and after the editor.
+fn take_terminal(enhanced: bool) -> std::io::Result<()> {
+    crossterm::terminal::enable_raw_mode()?;
+    execute!(std::io::stdout(), EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    if enhanced {
+        execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+            )
+        )?;
+    }
+    Ok(())
+}
+
+/// Undoes `take_terminal`: on quit, on a signal, on a panic, and while the editor runs.
+fn release_terminal(enhanced: bool) {
+    if enhanced {
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
+    let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+    // Not `ratatui::restore`: it prints its error, which panics once the terminal is gone, and in
+    // the panic hook that aborts.
+    let _ = ratatui::try_restore();
+}
+
+/// Opens `path` in $VISUAL or $EDITOR (else vi), giving the editor the terminal until it exits.
+/// The sessions keep running meanwhile; only their drawing waits.
+fn edit(terminal: &mut Term, path: &std::path::Path, enhanced: bool) -> Result<(), String> {
+    let editor = ["VISUAL", "EDITOR"]
+        .iter()
+        .find_map(|v| std::env::var(v).ok().filter(|e| !e.trim().is_empty()))
+        .unwrap_or_else(|| "vi".into());
+    release_terminal(enhanced);
+    // Through the shell, so an editor with arguments (`code --wait`) works.
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("sh")
+        .arg(path)
+        .status();
+    let _ = take_terminal(enhanced);
+    let _ = terminal.clear();
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("{editor} exited with {s}; set $EDITOR to the editor you use")),
+        Err(e) => Err(format!("couldn't run {editor}: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    #[test]
+    fn gone_needs_every_check_through_the_grace() {
+        let (mut gone, t, grace) = (Gone::default(), Instant::now(), Duration::from_secs(3));
+        let at = |s: u64| t + Duration::from_secs(s);
+        assert!(!gone.for_at_least(true, at(0), grace));
+        assert!(!gone.for_at_least(true, at(2), grace));
+        // Back for one check, as when another thread read the input: it starts over.
+        assert!(!gone.for_at_least(false, at(3), grace));
+        assert!(!gone.for_at_least(true, at(4), grace));
+        assert!(!gone.for_at_least(true, at(6), grace));
+        assert!(gone.for_at_least(true, at(7), grace));
+    }
+
+    #[test]
+    fn tty_wait_sees_the_terminal_close() {
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: openpty writes two descriptors into `master` and `slave`; the null name, termios
+        // and window size are optional.
+        let r = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(r, 0, "openpty: {}", std::io::Error::last_os_error());
+        // SAFETY: openpty succeeded, so both are open descriptors that nothing else owns.
+        let master = unsafe { OwnedFd::from_raw_fd(master) };
+        // SAFETY: as above.
+        let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+        // So the commands other tests run don't keep the pty open past their exec.
+        for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+            // SAFETY: sets a flag on descriptors this test owns; it reads or writes no memory.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        let tty = Tty { fd: slave.as_raw_fd(), _file: None };
+        let wait = Duration::from_millis(200);
+
+        assert_eq!(tty.wait(wait), Input::Idle);
+        // A whole line, as the pty is in canonical mode.
+        let mut m = std::fs::File::from(master);
+        m.write_all(b"x\n").unwrap();
+        assert_eq!(tty.wait(wait), Input::Ready);
+        // Read it, as crossterm would: with input waiting, macOS still says Ready after the close.
+        let mut buf = [0u8; 8];
+        // SAFETY: reads at most `buf.len()` bytes into `buf`.
+        assert_eq!(unsafe { libc::read(slave.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) }, 2);
+        assert_eq!(tty.wait(Duration::ZERO), Input::Idle);
+        drop(m);
+        // A child forked by another test before the line above shares the master until it execs.
+        let until = Instant::now() + Duration::from_secs(5);
+        while tty.wait(Duration::from_millis(10)) != Input::Gone {
+            assert!(Instant::now() < until, "the terminal closed but its input didn't say so");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}

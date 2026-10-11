@@ -1,0 +1,88 @@
+# Contributing to taskman
+
+Thanks for helping. Bug reports, ideas and pull requests are all welcome; for anything bigger than a fix, open an issue first so we can agree on the approach before you build it.
+
+Security problems: please don't open an issue; see [SECURITY.md](SECURITY.md).
+
+## Before you change behaviour
+
+Start with [docs/architecture.md](docs/architecture.md), the map of the code for people and coding agents alike: which file holds what, how the pieces fit, and what must stay true. Keep it current in the same pull request when files or structure change.
+
+Then read [docs/design.md](docs/design.md). Several choices look simplifiable and aren't: the embedded CLI, the hooks, session names, the inbox, the refresh rules. [docs/roadmap.md](docs/roadmap.md) lists ideas already agreed and what hasn't been verified; update it when something there ships. [AGENTS.md](AGENTS.md) holds the instructions coding agents follow (Claude Code reads it through `CLAUDE.md`), including the gotchas.
+
+## Build and check
+
+Rust 1.88 or newer (edition 2024; the code uses `let` chains).
+
+```bash
+cargo build                 # debug build: target/debug/taskman
+cargo test                  # unit tests live next to the code; tests/ drives the binary in a pty
+cargo fmt                   # CI fails on unformatted code (rustfmt.toml)
+cargo clippy --all-targets  # zero warnings; CI runs it with -D warnings
+scripts/test-install.sh     # install.sh and `taskman update` against fake releases (after cargo build)
+scripts/coverage.sh         # coverage per file, test-install.sh included (cargo install cargo-llvm-cov)
+cargo about generate --locked --fail about.hbs -o LICENSE-THIRD-PARTY   # after a dependency change (cargo install cargo-about --locked --features cli)
+```
+
+CI runs fmt, clippy, the tests and the install script's tests on Linux and macOS, checks the oldest supported Rust on Linux, runs `cargo deny` (deny.toml) for advisories, bans (wildcard versions; duplicate versions warn), licences and sources, and checks that `LICENSE-THIRD-PARTY` (the notices of the crates in the binary, which the release archives carry and `taskman --licenses` prints) matches `Cargo.lock`: after a dependency change, regenerate it with the `cargo about` command above and commit it. It also reports coverage on Linux, in the run's summary and as a notice on the pull request; nothing fails on the figure, but a change to logic should come with tests that run it.
+
+Code that parses what others write (tracker responses, ticket files, keys and links, the text `src/untrusted.rs` cleans) has property tests (`proptest`) beside its example tests: they state what must hold for any input, like "no terminal control character survives `clean`". The Jira and Linear clients are tested against recorded responses served locally (`src/replay.rs`), kept in `tests/fixtures/`: trim them by hand and use mock data only (`acme`, `ENG-52`, `example.atlassian.net`), never a real workspace's output. No test calls a real tracker.
+
+## Testing the TUI
+
+The TUI has unit tests that need no terminal. `src/app/test_support.rs` builds the App on a mock project with nothing started, sessions that run no process, and a state folder of each test's own. Behaviour (keys, mouse, paste, dialogs, what reaches a session) is tested in `src/app/events.rs`; what the screens show, in `src/ui/screens.rs`, against snapshots in `src/ui/snapshots/`. What only the real binary can show (the terminal, signals, a CLI's process) is tested in `tests/`, which drives it in a pty. [AGENTS.md](AGENTS.md) says which to use when.
+
+### Updating snapshots
+
+A change to what's drawn fails the screens' tests, each showing the difference, and leaves a `.snap.new` file beside the snapshot. If the new screen is what you meant:
+
+```bash
+INSTA_UPDATE=always cargo test screens   # or `cargo insta review`, with cargo-insta installed
+git diff src/ui/snapshots/               # check each change
+```
+
+Commit the updated `.snap` files with the change, so reviewers see the screens it changes. A new screen gets its snapshot the same way.
+
+## Trying the TUI
+
+To look at something by hand, drive the real binary in a detached tmux session, with its state and config kept away from your own:
+
+```bash
+S=$(mktemp -d); mkdir -p $S/state/taskman
+tmux new-session -d -s tmtest -x 160 -y 40 \
+  "env XDG_STATE_HOME=$S/state TASKMAN_CONFIG=$S/config.json target/debug/taskman"
+tmux send-keys -t tmtest C-a ,        # keys
+tmux capture-pane -p -t tmtest        # read the screen (-e for colours)
+```
+
+Seed `$S/state/taskman/tickets.json` and `$S/config.json` to set up a scenario. Use `TASKMAN_CONFIG`, not `XDG_CONFIG_HOME`, to isolate the accounts file: `gh` keeps its login under `XDG_CONFIG_HOME` too. Quit with `ctrl+a q`, Enter, so the sessions it started stop. In tmux, send Escape on its own: Escape followed by a key arrives as Alt+key.
+
+## Conventions
+
+- Match the surrounding code: comments say why, not what; doc comments on non-obvious items only.
+- Line widths: code at rustfmt's default 100 columns; comments wrapped by hand at about 100 (rustfmt doesn't wrap them on stable); Markdown one line per paragraph and per list item, left to the viewer to wrap.
+- New behaviour gets a unit test where it's pure logic (parsing, matching, ordering).
+- User-facing text (toasts, hints, docs) is short, plain and specific: say what happens, and in errors what to do about it. Hints name the prefix through `keys::prefix()`, never a literal `ctrl+a`.
+- Use mock names in code, tests, docs and commit messages: `ENG`, `ENG-52`, `acme`, `your-site.atlassian.net`. Never real company, customer, site or project names.
+- Text from trackers and PRs is untrusted: print it through `src/untrusted.rs` and keep it out of briefs (see "Untrusted text" in docs/design.md).
+- Scripts must work with macOS's BSD tools too (no `sed -i` without a suffix); use perl when in doubt.
+- Keep [docs/guide.md](docs/guide.md) current when behaviour or setup changes, and add a line under "Unreleased" in [CHANGELOG.md](CHANGELOG.md) for anything a user would notice.
+
+## Pull requests
+
+- One change per pull request, with a description of what changed and why, and how you checked it (tests, or what you saw in the TUI).
+- Commit messages: a summary line, then what changed and why.
+- CI must pass: fmt, clippy, tests, the install script's tests, MSRV and cargo-deny.
+- By contributing you agree that your contribution is dual licensed under MIT OR Apache-2.0, as the README says.
+
+Coding agents are welcome to help; you remain responsible for the change, so review what they write and run it.
+
+## Releases
+
+Maintainers cut releases with `scripts/release.sh X.Y.Z` from an up-to-date `main`. It refuses while the changelog has nothing under "Unreleased", then moves those entries under the new version and date, bumps `Cargo.toml` and `Cargo.lock`, builds, tests, commits "Release vX.Y.Z", tags `vX.Y.Z` and pushes both. The tag starts the Release workflow (`.github/workflows/release.yml`), which builds the macOS (Apple Silicon and Intel) and Linux binaries and publishes a GitHub Release with one `SHA256SUMS` and the version's changelog section as its notes. If GitHub hasn't started the workflow within a minute, the script starts it by hand; `gh run list --workflow release.yml` shows which happened. A run that failed leaves no release, or a draft the next run clears, so starting it again is enough: `gh workflow run release.yml -f tag=vX.Y.Z`. The workflow refuses a tag that already has a published release; to rebuild one, delete it first (`gh release delete vX.Y.Z`), then start the workflow. With immutable releases on, a published release's tag can't be reused.
+
+Versions follow Cargo's rule for 0.x: the patch (0.1.0 to 0.1.1) for anything compatible, fixes and new features alike, and the minor (0.1.1 to 0.2.0) for breaking changes such as changed keys, config or saved-state format, or a removed command. The release archives' names (`taskman-vX.Y.Z-<target>.tar.gz` holding just `taskman`, and `SHA256SUMS`) are what installed copies update from, so they must not change.
+
+## Code of conduct
+
+Everyone taking part is expected to follow the [code of conduct](CODE_OF_CONDUCT.md).

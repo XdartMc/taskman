@@ -1,0 +1,118 @@
+# Formatting, lints, tests and a coverage report on every pull request and every push to main,
+# and a weekly dependency check so new security advisories show up without a pull request.
+# Actions are pinned by commit; Dependabot proposes updates (.github/dependabot.yml).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  # A newer push to a pull request replaces its run. A push to main always finishes: a release
+  # tagged right after a merge used to cancel the merge commit's run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    # Under two minutes with a warm cache; a cold one and a slow macOS runner take far longer.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      # The install script and `taskman update` against fake releases on a local server.
+      - run: cargo build --locked && scripts/test-install.sh
+
+  # How much of the code the tests run, in the run's summary and as a notice on the pull request.
+  # A report, not a gate. Linux only, as macOS minutes are billed.
+  coverage:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal --component llvm-tools-preview && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: cargo-llvm-cov
+      # The tests and scripts/test-install.sh, whose `taskman update` runs outside cargo test.
+      - run: scripts/coverage.sh
+      - name: Report
+        run: |
+          jq -r --arg root "$GITHUB_WORKSPACE/" '
+            def pct: (.percent * 10 | round / 10 | tostring) + "%";
+            .data[0] as $d
+            | "### Coverage: \($d.totals.lines | pct) of lines",
+              "",
+              "Functions \($d.totals.functions | pct), regions \($d.totals.regions | pct). Unit tests in src/ count as lines run, and so do the binary tests and scripts/test-install.sh. A report, not a gate.",
+              "",
+              "| File | Lines | Covered |",
+              "|---|---:|---:|",
+              ($d.files | sort_by(.filename)[]
+                | "| \(.filename | ltrimstr($root)) | \(.summary.lines.count) | \(.summary.lines | pct) |")
+          ' coverage.json >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Coverage::$(jq -r '.data[0].totals.lines.percent * 10 | round / 10' coverage.json)% of lines (details in the run's summary)"
+
+  # The oldest Rust taskman supports (rust-version in Cargo.toml).
+  msrv:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.88 --profile minimal && rustup default 1.88
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo check --all-targets --locked
+
+  # Advisories, bans (no wildcard versions; duplicates only warn), licenses and sources
+  # (deny.toml), and the third-party notices (about.toml). The prebuilt binaries rather than
+  # cargo-deny-action: that one pulls a Docker Hub image, and anonymous pulls from shared runner
+  # IPs hit Docker Hub's rate limit. The job name is a required check on main; keep it.
+  deny:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          # cargo-about's version is the release workflow's; a different one may word the file
+          # differently.
+          tool: cargo-deny,cargo-about@0.9.2
+      - run: cargo deny --locked check advisories bans licenses sources
+      # LICENSE-THIRD-PARTY, which the archives and `taskman --licenses` carry, must match the
+      # lockfile: the file as cargo-about would write it now has to be the one committed.
+      - name: Check the third-party notices are current
+        run: |
+          cargo about generate --locked --fail about.hbs -o notices.txt
+          if ! diff LICENSE-THIRD-PARTY notices.txt; then
+            echo "LICENSE-THIRD-PARTY is out of date: run the cargo about command in about.toml and commit the result" >&2
+            exit 1
+          fi

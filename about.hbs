@@ -1,0 +1,25 @@
+Third-party notices for taskman
+
+taskman is licensed under either the MIT license or the Apache License 2.0, at your option:
+LICENSE-MIT and LICENSE-APACHE sit beside this file in a release archive, and in the source at
+https://github.com/sanagnos/taskman. The taskman binary also contains code from the Rust crates
+listed below, under licenses that ask for their notices to go with it. This file is generated
+from the crates' own license files by cargo-about, and `taskman --licenses` prints it.
+
+Licenses: {{#each overview}}{{{name}}}{{#unless @last}}, {{/unless}}{{/each}}.
+
+Each license text follows, with the crates it covers; crates whose texts differ, if only in the
+copyright line, are listed apart.
+{{#each licenses}}
+{{#unless (and (eq (len used_by) 1) (eq used_by.[0].crate.name "taskman-app"))}}
+
+================================================================================
+{{{name}}} ({{{id}}})
+Used by:
+{{#each used_by}}
+  {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} <{{{crate.repository}}}>{{/if}}
+{{/each}}
+
+{{{text}}}
+{{/unless}}
+{{/each}}

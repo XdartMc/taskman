@@ -1,0 +1,5 @@
+/target
+CLAUDE.local.md
+# Snapshots insta proposes when one changes; review them, never commit them.
+*.snap.new
+*.pending-snap

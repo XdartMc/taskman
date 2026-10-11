@@ -1,0 +1,144 @@
+# Architecture
+
+A map of the code for anyone changing it, people and coding agents alike: what's where and how the parts talk. Why things are built this way is in [design.md](design.md); what taskman does for its users is in the [guide](guide.md). Keep this file current in the same pull request when files or structure change.
+
+## Bird's-eye view
+
+taskman is a Rust terminal UI for working on several tickets at once. A project is a folder (usually a repository) with its sessions: real `claude` (or `codex`) CLIs in embedded terminals. Project agents are sessions with no ticket that can message the others. Integrations are optional and per project: a tracker (Jira, Linear, GitHub Issues or Local files) adds tickets, each with a tracker panel and usually its own worktree, and a GitHub remote with `gh` adds a PR panel.
+
+One thread draws the screen and feeds every session's terminal; everything slow (trackers, `gh`, git fetches, token commands) runs on plain threads that report back over a channel. The same binary is also the command line the sessions use (`taskman status`, `add`, `close`, `move`), the hook Claude Code and Codex run (`taskman hook`), and the way a session moves to another terminal (`taskman resume`). Saved state is two JSON files: `tickets.json` in the state folder (`~/.local/state/taskman/`) and `config.json` (accounts and settings).
+
+## Code map
+
+### Entry point and commands
+
+| File | What it holds |
+|---|---|
+| `src/main.rs` | entry point, terminal setup (mouse, bracketed paste, kitty keyboard flags), event loop, the shutdown every quit goes through (`shutdown`: heartbeat, save, sessions, and after a signal a bounded wait for git), the watchdog that ends taskman when the terminal is gone or a second signal comes, the `hook`, `status`, `add`, `close`, `move`, `resume`, `update`, `--version`, `--licenses` and `--help` subcommands, handing the terminal to `$EDITOR` |
+| `src/cli.rs` | what the CLI commands share: the project a command means (`pick_project`, `project_named`, `context`) and the key an input names in it (`resolve_key`) |
+| `src/status.rs` | `taskman status [KEY]`: a ticket's issue, worktree and PR fetched fresh, an agent's project overview with session states, or from a plain shell whichever the current folder belongs to (else every project, a line per ticket); the briefs point sessions here |
+| `src/add.rs` | `taskman add KEY...`: picks the project and key, checks the key with the tracker, leaves a request in the inbox folder and prints the TUI's reply; also the TUI's side of the inbox (claiming requests, replying, the `alive` heartbeat) |
+| `src/close.rs` | `taskman close KEY...` / `--merged`: finds each ticket's project, sends a close request through the inbox and prints the reply; the TUI's per-ticket outcome, its reply line and the worktree removal it runs (`remove_worktree`) |
+| `src/resume.rs` | `taskman resume KEY`: continues a ticket's or agent's session in the user's terminal with `App::launch`; the owner file whose lock keeps a session to one copy (pane or outside) |
+| `src/hook.rs` | `taskman hook <state>`, run by the Claude Code hooks taskman installs; writes status files (each record naming the start of the session it belongs to) and refresh signal files |
+| `src/update.rs` | `taskman update`, and the TUI's background updates (`Updater`): finds the latest release, downloads it over HTTPS (`gh` as the fallback, for a private repository), checks its SHA256SUMS, its attestation when `gh` can (`gh attestation verify`, signed by the release workflow; `TASKMAN_INSECURE_SKIP_ATTESTATION` skips it), and that it runs, renames it over the running binary, keeps `update.json`, and says what the sidebar shows |
+
+### The TUI
+
+| File | What it holds |
+|---|---|
+| `src/app.rs` | the TUI's state (`App`, `Mode`), its layout (`lay_out`: from the terminal's size each tick, and from the frame's as it's drawn) and its `tick`: saving, the ticket order, toasts, selecting. Its behaviour is in the child modules below, each with its own `impl App` |
+| `src/app/ticket.rs` | one ticket or agent as the TUI holds it (`TicketView`): session, stopping it and whether its last CLI is still being reaped (`stop_session`, `reaping`), state, which hook records are its session's (`takes`), fetched panels, which comments are new, what a PR lookup changes |
+| `src/app/poll.rs` | each session's state: the hooks' status files (`parse_status`), and the inferred states when no hook fires (`Status::key`, `Status::infer`, `inferred_state`); Local files tickets reread |
+| `src/app/sync.rs` | background work: `Remote<T>` (fetched data, its refresh flags and the id of its latest fetch), `Msg` and `drain_messages`, the fetch schedule, worktree creation; fetches and creations are matched to their results by id, so a late reply is dropped |
+| `src/app/sessions.rs` | starting sessions under their owner lock (which fails closed: no lock, no session) and only once the last CLI is gone, their names, handing them to another terminal and back |
+| `src/app/launch.rs` | how a session's CLI starts (`Launch`, `App::launch`): arguments, environment, the ticket's and agent's briefs |
+| `src/app/input.rs` | keys: the modes, the prefix commands, paste, the links list, the session's history in `$EDITOR` |
+| `src/app/mouse.rs` | the wheel, drag-selecting text in a pane, copying it |
+| `src/app/forms.rs` | `Field` and `Form` (fields reached by label, never by index), a field's `List` (the Add form's open issues, ↑/↓ moving a highlight), form keys, submitting with a background `Check` |
+| `src/app/add_form.rs` | the Add form: ticket or agent, CLI, worktree and base; the open issues it lists (`OpenIssues`), each list matched to its request (`Listing`) so a late one is dropped, and the one picked with ↑/↓; `parse_key` |
+| `src/app/settings.rs`, `projects.rs`, `accounts.rs` | the Settings popover and its General form; the project forms and saving a project; the account forms and testing a connection |
+| `src/app/tickets.rs` | adding, closing and renaming tickets and agents; stacking (`base_named`, `stack_of`, `pr_target`) |
+| `src/app/inbox.rs` | the TUI's side of `taskman add` and `taskman close`: taking requests, the agent approval dialog, the replies |
+| `src/selection.rs` | selecting text with the mouse: what keys do while text is selected, the frozen screen, reading the text back (joining wrapped lines), copying it to the clipboard |
+| `src/links.rs` | links in a session: the OSC 8 links vt100 keeps per cell (our fork, `[patch.crates-io]`) written back out around the cells drawn (`mark`) and sent once per run of cells (`Runs`, the terminal's writer), the `prefix l` list (`list`), the http(s)-only rule (`openable`) |
+| `src/keys.rs` | crossterm key events back to terminal bytes; `normalize` folds Shift+letter; the prefix key (`Prefix`, `prefix()`) |
+| `src/ui.rs` | drawing: the layout (`layout`, `Areas`), `draw`, which calls each part of the screen in turn, NO_COLOR's `drop_colours`, and what the parts share (`dim`, `spinner`, the state badges, a card's PR summary) |
+| `src/ui/sidebar.rs` | the sidebar: the projects and their cards, laid out as rows and scrolled to keep the selection in view (`SidebarScroll`, kept on `App`) |
+| `src/ui/pane.rs` | the session's pane: its header, the session's terminal or what shows instead (handed off, a failed worktree, ended), "selecting", the footer and the prefix menu |
+| `src/ui/panels.rs` | the right column: the tracker and GitHub panels, the agents' project board, and how a panel draws with its links (`render_panel`) |
+| `src/ui/dialogs.rs` | what draws over the screen: confirm dialogs, the links list, forms, settings and help |
+
+### Sessions
+
+| File | What it holds |
+|---|---|
+| `src/session.rs` | one `claude` process in a pseudo-terminal (portable-pty) with a vt100 screen; answers terminal queries; stopping one (`stop`, or dropping it) hangs its CLI up and reaps it on a thread, whose `Reaper` is kept by whatever must wait for the CLI to be gone (`stop_all` at quit waits for them all); for tests, `Session::fake`, with no process, recording what it's sent, and `fake_slow`, whose CLI stays until the test lets it go |
+| `src/session_ids.rs` | one conversation per session: `claim` refuses a session id another ticket or agent already holds (hooks, leftover status files, `--resume`); the toast and `session-conflicts.log` when Claude Code switches a session onto another's (see "One conversation per session" in design.md) |
+
+### Trackers, GitHub and worktrees
+
+| File | What it holds |
+|---|---|
+| `src/tracker.rs` | everything that depends on the provider: `Issue`, which every tracker produces (with `LinkedPr`, the PRs closing it), and `Listed`, an open issue as the Add form lists it (`matching` narrows them); `Client`, which fetches one, or the open issues (`open_issues`) (`Client::for_project` for the CLI); `Access` and `Clients`, the TUI's tokens, clients and board listings; and each provider difference as one method on `Provider` or `Tracker` |
+| `src/jira.rs`, `src/linear.rs` | the Jira and Linear APIs: requests and parsing into `tracker::Issue` and `tracker::Listed` |
+| `src/github_issues.rs` | the GitHub Issues tracker through `gh api graphql`: the saved repository (`Repo`), keys from GitHub's own forms (`key_from_input`), one issue parsed into `tracker::Issue`, its open issues for the Add form, access errors that say what to run; a test runner that serves recorded output |
+| `src/local.rs` | the Local files tracker: tickets as markdown files in the project folder's `workplan/` columns, parsed into `tracker::Issue` (and those not done into `tracker::Listed`); creating and moving them, and `taskman move` |
+| `src/github.rs` | PR lookup through `gh` (first the PRs that close a GitHub Issues ticket's issue, `Closes`), whether a project's folder can show PRs (`probe`), worktree discovery through `git` |
+| `src/worktree.rs` | creating a ticket's worktree: branch and folder names from the project's formats, fetch, `git worktree add`, the start point of a stacked ticket, whether git made it now (`Created::made`); checking and removing one (`removal_check`, `remove`): uncommitted, untracked and ignored files, caches tagged with `CACHEDIR.TAG` (`tagged_cache`) and the OS's folder metadata (`OS_METADATA`) aside, and unpushed commits; the removing git sharing the owner lock |
+| `src/stack.rs` | stacked tickets: where a ticket stands against its base (open, merged, PR still on the base's branch), the hints and the brief's text |
+
+### Shared
+
+| File | What it holds |
+|---|---|
+| `src/store.rs` | saved state (projects, tickets, UI prefs), config (accounts, the auto-update toggle, the prefix), paths, `write_atomic` (synced, then renamed over); in unit tests, a scratch state folder and config file per test (`scratch`) and a made-up home |
+| `src/proc.rs` | `proc::run`: git, gh and token commands with a time limit, no terminal and prompts off; `run_with_input` feeds a command's stdin (the updater pipes the download into `tar`) |
+| `src/untrusted.rs` | tracker and PR text printed as data: `clean` strips terminal control characters and the characters that hide text from a reader (bidirectional controls, Unicode tags), `line` and `block` keep it in its own line or indented block, `labelled` adds the note `taskman status` prints above it |
+| `src/util.rs` | timestamps, relative ages, opening URLs, and cutting text to fit: `truncate` (keeps the start), `truncate_start`, `truncate_middle` (account labels), `fit_label` (display width; sidebar names) |
+
+### Tests
+
+| File | What it holds |
+|---|---|
+| `src/app/test_support.rs` | for tests: `offline`, an `App` from saved state with nothing read or started; `acme_app`, a mock project with sessions in every state and fetched panels; `attach` (a `Session::fake`), `draw` (into a `TestBackend`, as text), `settle` (a thread's message) |
+| `src/app/events.rs` | tests: the App driven by keys, mouse reports, pastes and `Msg`s, checking modes, selection, the bytes a session gets, dialogs, toasts and what's saved |
+| `src/ui/screens.rs`, `src/ui/snapshots/` | tests: the main screens, dialogs and forms drawn from `acme_app` at 80x24 (160x40 for the panels and the board), compared with `insta` snapshots |
+| `src/replay.rs` | tests only: a local HTTP server answering with recorded responses (`tests/fixtures/`), so the Jira and Linear clients are tested without reaching a tracker |
+| `tests/hangup.rs` | the binary in a pty, its terminal closed while idle (a clean quit, as `prefix q`) and mid-input (the watchdog): taskman and its session must end |
+| `tests/links.rs` | a session's links reach the outer terminal as OSC 8, and `prefix l` opens one through a stub `$BROWSER` |
+| `tests/close.rs` | `taskman close` against the binary in a pty, with real git worktrees and an origin |
+| `tests/ownership.rs` | one copy of a session: `prefix R` restarts it under the same claim, killing `taskman resume` leaves it claimed by its CLI, and a lock that can't be taken stops the session starting until Enter once it can |
+| `tests/hooks.rs` | a SessionEnd hook that fires after taskman dropped its CLI (a stub whose hook outlives the kill): closed and added again, the ticket doesn't take the old session's end or resume its conversation; restarted, the new session doesn't show as ended |
+| `tests/stopping.rs` | a stub CLI that goes on after the hangup: `prefix R` starts the next copy only once it's gone, closing (the dialog's `r` and `taskman close`) removes the worktree only once it's gone, a hand-off keeps the session claimed until then, `taskman resume` waiting its turn, and a renamed agent's new name is claimed before it's saved, `taskman resume` under it refused |
+| `tests/lifecycle.rs` | SIGTERM and SIGHUP quit as `prefix q`, waiting for a worktree still being removed, which a second signal cuts short; ctrl+z never reaches a session; a panic in one session's reader (`TASKMAN_TEST_PANIC`, debug builds) ends it alone; a second taskman and an unreadable tickets.json are refused |
+| `tests/licenses.rs` | `taskman --licenses` prints `LICENSE-THIRD-PARTY` from the binary, and `--help` names it |
+| `tests/launch.rs` | what a session's CLI is started with, recorded by a stub CLI: run as if inside Claude Code and tmux, none of their variables reach it; `prefix t` hands it off (the command copied, a tmux window offered through a stub `tmux`), `taskman resume` starts it the same, and Enter brings it back the same; a CLI that can't start says so |
+| `tests/selection.rs` | selecting in the Claude pane with mouse reports: the selection stays and is copied, ctrl+c copies without interrupting, streaming output and scrolling keep it on its text, under NO_COLOR it shows with nothing coloured, `prefix v` opens the history in `$EDITOR` |
+| `tests/fixtures/` | recorded Jira and Linear responses for `src/replay.rs`, and `gh api` output for `github_issues`' test runner (`github/`): hand-trimmed, mock data only; `state-first-private-build/`, tickets.json and config.json as the first build wrote them |
+| `tests/common/mod.rs` | what the binary tests share: isolated state, starting it in a pty, answering terminal queries; `Tui`, the binary in a pty with its screen read through vt100 on a thread, keys, mouse reports and waits on the screen; `project`, `stub_session` (a CLI that notes the signals and lines it gets) and `stub_desktop` (clipboard commands and browser), all three set up by `stubbed`; `acme`, a git repository with an origin, and `slow_git` and `slow_add_git`, a git the test holds up at `worktree remove` or `worktree add` |
+
+### Docs
+
+| File | What it holds |
+|---|---|
+| `docs/` | the user guide, this map, design decisions, roadmap, and `taskman.gif`, the demo |
+| `AGENTS.md`, `CLAUDE.md` | the instructions for coding agents; `CLAUDE.md` only imports `AGENTS.md` |
+| `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md` | how to contribute, what taskman trusts and how to report a vulnerability (and verify a release), where to ask for help |
+| `.github/` | the CI and release workflows, issue and pull request templates, Dependabot, `CODEOWNERS` |
+| `deny.toml` | cargo-deny's settings, checked in CI: advisories, bans, the accepted licenses and sources |
+| `about.toml`, `about.hbs`, `LICENSE-THIRD-PARTY` | the notices of the crates built into the binary: cargo-about's settings (accepting `deny.toml`'s licenses) and template, and the file they generate, which the binary embeds (`taskman --licenses`) and every release archive carries beside `LICENSE-MIT` and `LICENSE-APACHE`; CI and the release build regenerate it and fail when it doesn't match `Cargo.lock` |
+
+## How the pieces fit
+
+- **Sessions.** `App::launch` (used by the pane's `build_command` and by `taskman resume`) starts `claude` with `--name <key>` (`<project>/<key>` while another project has the key: `store::session_name`; other sessions message it by that name), `--resume <id>` when a transcript exists, `--append-system-prompt` (the ticket or agent brief), and `--settings` adding hooks that run `taskman hook <state>`. Hooks write `~/.local/state/taskman/status/<project-id>/<KEY>.json` (`store::status_file`), which `poll_status` reads; each start passes `TASKMAN_LAUNCH`, which the hook records, so a hook of an earlier start writing late isn't taken for the running session's (`TicketView::takes`). A ticket is its project's main checkout and its key (`Ticket::is`): keys repeat across projects, so never look one up by key alone. The user's own Claude settings are never touched. A ticket with `cli: Codex` starts `codex` instead (`session_args`): the same hooks as `-c` overrides with their trust hashes (`hook::codex_config`), the brief as `developer_instructions`, and `codex resume <id>`. Sessions get a `taskman` link to the running binary first on their PATH, and the briefs tell them to read their ticket with `taskman status`. The `--settings` permissions allow `taskman status`, `taskman add` and `taskman move` without a prompt (`hook::settings_json`); an agent or role from `taskman add` still waits for the user's approval in the TUI. Text from trackers and PRs is untrusted: print it through `untrusted` and keep it out of briefs (see "Untrusted text" in [design.md](design.md)). Agents add tickets and other agents with `taskman add`, which leaves a request in the state folder's `inbox/` for the TUI (`take_inbox`) rather than editing `tickets.json`. A change to the request needs a new `add::INBOX_FORMAT`, so a command never asks an older running TUI for something it can't do. An agent's optional `role` (`Ticket::role`, kept on `ClosedAgent` too) is appended to its brief at every session start. Agents added through `taskman add` start their session once the user approves them (`App::ask_next`, then `TicketView::start`). `taskman close` uses the same inbox (a request with `close`); the TUI closes through the close dialog's code (`App::close_at`, then the removal check) and it's deliberately not on the allow-list.
+- **Handed-off sessions.** `ctrl+a t` and `taskman resume` move a session between the pane and the user's terminal; `TicketView::away` says where it is, and `resume::Hold` (an `flock` on `<KEY>.owner` beside the status file) keeps it to one copy. Never start a session without `start_session`, which takes that lock.
+- **Stopping sessions.** A stopped CLI takes a moment to go (hung up, then killed, on a thread): until it's reaped, the ticket's `reaper` (`TicketView::stop_session`) keeps a new session from starting, a closed ticket's worktree from being removed and, after a hand-off, the claim from being let go, the owner file reading `Owner::Stopping` meanwhile. See "Stopping a session" in [design.md](design.md).
+- **Stacked tickets.** `Ticket::base` names the ticket a worktree started from; whether it merged comes from the base ticket's PR or from the ticket's own PR's `baseRefName` (`App::stack_of`).
+- **Background work** runs on plain threads and reports back over an `mpsc` channel (`Msg`); there is no async runtime. `Remote<T>` holds fetched data with its freshness and refresh flags. Keep network calls and token commands off the UI thread; commands go through `proc::run` so a hung one gives up.
+- **Accounts vs projects.** An account is credentials (`store::Account`, id like `jira-1`); a project's tracker names its account or falls back to `Config::account_for`. Tokens are never stored: `env:VAR` or `cmd:COMMAND`, read in the background by `tracker::Clients`.
+- **Trackers.** Fetching goes through `tracker::Client`, and each difference between providers is a method on `Provider` or `Tracker` in `tracker.rs` (`needs_account`, `has_board`, `branch_source`, ...): use those rather than matching on a provider. The account forms (`app/accounts.rs`: Jira's email, Linear's workspace) and `Account::who` still match on it. A new provider is a `store::Provider` variant, its API module, a `tracker::Client` variant, one arm per method in `tracker.rs`, and its account form fields.
+- **Modes.** `Mode` decides where keys go: Claude (Normal), a form, Settings, or a confirm dialog. Every key goes to Claude except after the prefix (`ctrl+a` unless changed). Hints name it through `keys::prefix()`, never a literal `ctrl+a`.
+
+## Invariants
+
+What must stay true whatever changes. Each has a section in [design.md](design.md) saying why.
+
+- **A ticket is its project and its key** (`Ticket::is`). Keys repeat across projects, so nothing looks a ticket up, names its status file or claims its session by key alone.
+- **One copy of a session.** Every session starts through `start_session`, which takes the owner lock (`resume::Hold`); a pane and `taskman resume` never run the same session at once, and a lock that can't be taken stops the session starting. The lock is taskman's, not the CLI's, so a session also starts only once the last one's CLI is reaped (`TicketView::reaping`), and a hand-off keeps the lock until then. `taskman resume` finds sessions in the saved state, so a rename, close or project removal saves first (`App::try_save`) and is undone when the save fails, its claims kept.
+- **One conversation per session.** `session_ids::claim` refuses an id another ticket or agent holds, wherever an id comes in.
+- **The user's own CLI settings are never touched.** Hooks and permissions come in through `--settings` (Codex: `-c` overrides) on each launch.
+- **Tracker and PR text is untrusted.** It's printed through `untrusted` and never goes into a brief, since anyone who can write a comment could write instructions.
+- **Tokens are never stored.** Accounts say where a token comes from (`env:VAR` or `cmd:COMMAND`); it's read in the background when needed.
+- **Nothing slow runs on the UI thread.** Network calls and token commands run on threads; git, gh and token commands go through `proc::run`, with a time limit and no terminal.
+- **Saved state is never replaced by less.** Only a missing file reads as empty; a file this build can't read stops the TUI rather than being overwritten. New fields get `#[serde(default)]`.
+- **Sessions change the TUI's state only through the inbox.** `taskman add` and `taskman close` leave requests for the running TUI instead of editing `tickets.json`; a changed request gets a new `add::INBOX_FORMAT`.
+- **Provider differences live in `tracker.rs`,** as methods on `Provider` or `Tracker`, not as matches on the provider elsewhere.
+
+## Cross-cutting concerns
+
+- **Threads and messages.** There is no async runtime. Background work runs on plain threads and sends a `Msg` over an `mpsc` channel; `drain_messages` applies them on the UI thread each tick. `Remote<T>` (in `app/sync.rs`) is fetched data with its freshness and refresh flags, so a ticket never starts a refresh while one is in flight, and the id of its latest fetch, so a reply that lands after the tracker changed or the ticket was closed and added again is dropped rather than shown as fresh.
+- **Status files and hooks.** A session's state comes from the files its hooks write under the state folder's `status/<project-id>/`, read by `app/poll.rs`; each record names the start of the session that wrote it, and the pane takes only its own start's. When no hook fires (an approved permission prompt, an interrupt), the state is inferred from keys and the screen.
+- **The owner lock.** `<KEY>.owner` beside the status file, held with `flock` by whichever process runs the session (the TUI or `taskman resume`), by the TUI after a hand-off until the pane's CLI is reaped, and by the git removing its worktree; the system releases it however the process ends. It's taken before every start and fails closed: without it, the session doesn't start.
+- **The inbox.** The state folder's `inbox/` carries requests from the CLI commands to the running TUI and the TUI's replies back; `inbox/alive` is the TUI's heartbeat (written whole and renamed into place, so a command never reads it half written) and says which request formats it understands, so a command knows whether anything will answer and what it may ask.
+- **Testing layers.** Unit tests sit next to the code; pure decisions (parsing, matching, ordering) are extracted so they can be tested where they live. Code that parses others' text has `proptest` properties too. `app/test_support.rs` builds an `App` on a mock project with nothing started; `app/events.rs` drives it with keys, mouse reports, pastes and messages; `ui/screens.rs` compares what's drawn with `insta` snapshots. The tracker clients are tested against recorded responses in `tests/fixtures/`, served by `replay.rs` (GitHub Issues' by its test runner); no test reaches a real tracker or runs gh for one. What needs the real binary (the terminal, signals, a CLI's process, hooks, the clipboard and browser commands) is in `tests/`, which runs it in a pty with stub CLIs.

@@ -1,0 +1,330 @@
+//! Snapshots of the screens users see, drawn from a mock project (`test_support::acme_app`) into a
+//! `TestBackend`: what each shows is in `snapshots/`, one file each, reviewed like code. After a
+//! change to drawing, `cargo insta review` (or `INSTA_UPDATE=always cargo test`) updates them.
+//!
+//! Most are 80 by 24, where the sidebar folds and the panels hide; the panels and the agents' board
+//! need a wider screen, 160 by 40.
+
+use crate::app::test_support::{acme_app, attach, draw, key, long_sidebar, offline};
+use crate::app::{AgentAsk, Mode, SettingsItem};
+use crate::store::Saved;
+use crate::worktree::RemoveCheck;
+use crossterm::event::KeyCode;
+use insta::assert_snapshot;
+use std::time::Instant;
+
+const SESSION: &str = "\x1b[1m✻ Welcome to Claude Code\x1b[0m\n\n> Add the magic link sign-in\n\n\
+● I'll start with the token table.\n\n  ⎿  Wrote src/auth/link.rs\n\n> ";
+
+fn select(app: &mut crate::app::App, key: &str) {
+    let i = app.tickets.iter().position(|tv| tv.t.key == key).unwrap();
+    app.select(i);
+}
+
+#[test]
+fn welcome() {
+    assert_snapshot!(draw(&mut offline(Saved::default()), 80, 24));
+}
+
+#[test]
+fn welcome_with_a_project() {
+    let saved = Saved { tickets: vec![], ..crate::app::test_support::acme() };
+    assert_snapshot!(draw(&mut offline(saved), 80, 24));
+}
+
+#[test]
+fn ticket_with_its_panels() {
+    let mut app = acme_app();
+    draw(&mut app, 160, 40);
+    attach(&mut app, "ENG-52", SESSION);
+    assert_snapshot!(draw(&mut app, 160, 40));
+}
+
+#[test]
+fn ticket_on_a_small_screen() {
+    let mut app = acme_app();
+    draw(&mut app, 80, 24);
+    attach(&mut app, "ENG-52", SESSION);
+    assert_snapshot!(draw(&mut app, 80, 24));
+}
+
+/// Its review threads too, as the tracker panel is off.
+#[test]
+fn pr_panel() {
+    let mut app = acme_app();
+    app.prefs.show_jira = false;
+    draw(&mut app, 160, 40);
+    attach(&mut app, "ENG-52", SESSION);
+    assert_snapshot!(draw(&mut app, 160, 40));
+}
+
+/// No PR yet, and the last look for one failed: the label is red, and the panel says why.
+#[test]
+fn no_pr_after_a_failed_refresh() {
+    let mut app = acme_app();
+    select(&mut app, "ENG-70");
+    let tv = app.tickets.iter_mut().find(|tv| tv.t.key == "ENG-70").unwrap();
+    tv.pr.error = Some("gh: error connecting to api.github.com".into());
+    tv.pr.fetched_at = crate::app::test_support::ago(30.0);
+    assert_snapshot!(draw(&mut app, 160, 40));
+}
+
+#[test]
+fn agents_board() {
+    let mut app = acme_app();
+    select(&mut app, "acme-lead");
+    draw(&mut app, 160, 40);
+    attach(
+        &mut app,
+        "acme-lead",
+        "\x1b[1m✻ Welcome to Claude Code\x1b[0m\n\n> Which tickets wait on review?\n\n> ",
+    );
+    assert_snapshot!(draw(&mut app, 160, 40));
+}
+
+#[test]
+fn ended_session() {
+    let mut app = acme_app();
+    select(&mut app, "ENG-70");
+    assert_snapshot!(draw(&mut app, 80, 24));
+}
+
+/// Its owner lock couldn't be taken, so the session didn't start.
+#[test]
+fn session_without_its_lock() {
+    let mut app = acme_app();
+    select(&mut app, "ENG-70");
+    let tv = app.tickets.iter_mut().find(|tv| tv.t.key == "ENG-70").unwrap();
+    tv.lock_error = Some(
+        "~/.local/state/taskman/status/acme-0123abcd/ENG-70.owner: Permission denied (os error 13)"
+            .into(),
+    );
+    assert_snapshot!(draw(&mut app, 80, 24));
+}
+
+/// A sidebar longer than the screen, from the top: the last row counts the cards below, with ●
+/// as one of them needs you.
+#[test]
+fn long_sidebar_from_the_top() {
+    assert_snapshot!(draw(&mut long_sidebar(20), 160, 40));
+}
+
+/// Scrolled to its last card: the top row counts the cards above, and the folded project below is
+/// the one entry hidden.
+#[test]
+fn long_sidebar_at_its_last_card() {
+    let mut app = long_sidebar(20);
+    draw(&mut app, 160, 40);
+    select(&mut app, "ENG-90");
+    assert_snapshot!(draw(&mut app, 160, 40));
+}
+
+#[test]
+fn folded_long_sidebar_from_the_top() {
+    assert_snapshot!(draw(&mut long_sidebar(20), 80, 24));
+}
+
+#[test]
+fn folded_long_sidebar_at_its_last_card() {
+    let mut app = long_sidebar(20);
+    draw(&mut app, 80, 24);
+    select(&mut app, "ENG-90");
+    assert_snapshot!(draw(&mut app, 80, 24));
+}
+
+#[test]
+fn prefix_menu() {
+    let mut app = acme_app();
+    app.on_key(crate::app::test_support::ctrl('a'));
+    assert_snapshot!(draw(&mut app, 80, 24));
+}
+
+#[test]
+fn help() {
+    let mut app = acme_app();
+    app.mode = Mode::Help(Default::default());
+    assert_snapshot!(draw(&mut app, 80, 24));
+}
+
+#[test]
+fn close_dialog_offering_to_remove_the_worktree() {
+    let mut app = acme_app();
+    app.close_check = Some(RemoveCheck {
+        path: "/src/acme-ENG-52".into(),
+        problems: Vec::new(),
+        branch: Some("eng-52-login".into()),
+        head: "0123456".into(),
+        ignored: Vec::new(),
+    });
+    app.mode = Mode::ConfirmClose;
+    assert_snapshot!(draw(&mut app, 80, 24));
+}
+
+#[test]
+fn close_dialog_offering_to_delete_ignored_files() {
+    let mut app = acme_app();
+    app.close_check = Some(RemoveCheck {
+        path: "/src/acme-ENG-52".into(),
+        problems: Vec::new(),
+        branch: Some("eng-52-login".into()),
+        head: "0123456".into(),
+        ignored: [".env", "data.db", "notes/", "uploads/"].map(String::from).to_vec(),
+    });
+    app.mode = Mode::ConfirmClose;
+    assert_snapshot!(draw(&mut app, 80, 24));
+}
+
+#[test]
+fn close_dialog_keeping_a_worktree_it_could_not_check() {
+    let mut app = acme_app();
+    app.close_unchecked = Some(
+        "git worktree failed: not a git repository (or any of the parent directories): .git".into(),
+    );
+    app.mode = Mode::ConfirmClose;
+    assert_snapshot!(draw(&mut app, 80, 24));
+}
+
+#[test]
+fn close_dialog_keeping_the_worktree() {
+    let mut app = acme_app();
+    app.close_check = Some(RemoveCheck {
+        path: "/src/acme-ENG-52".into(),
+        problems: vec!["2 uncommitted files".into(), "1 commit not pushed".into()],
+        branch: None,
+        head: "0123456".into(),
+        ignored: vec![".env".into()],
+    });
+    app.mode = Mode::ConfirmClose;
+    assert_snapshot!(draw(&mut app, 80, 24));
+}
+
+#[test]
+fn agent_approval() {
+    let mut app = acme_app();
+    let req = serde_json::from_value(serde_json::json!({
+        "repo": "/src/acme", "from": "✦ lead", "reply_by": 0,
+        "items": [{ "kind": "agent", "name": "tester", "role": "Run the test suite on each PR and report failures" }],
+    }))
+    .unwrap();
+    app.mode = Mode::ConfirmAgent(Box::new(AgentAsk { req, open: false, shown: Instant::now() }));
+    assert_snapshot!(draw(&mut app, 80, 24));
+}
+
+#[test]
+fn settings() {
+    let mut app = acme_app();
+    app.open_settings(SettingsItem::Project(0), false);
+    assert_snapshot!(draw(&mut app, 80, 24));
+}
+
+#[test]
+fn add_form() {
+    let mut app = acme_app();
+    app.on_key(crate::app::test_support::ctrl('a'));
+    app.on_key(key(KeyCode::Char('n')));
+    assert_snapshot!(draw(&mut app, 80, 24));
+}
+
+/// Project acme on GitHub Issues (acme/web, prefix ENG).
+fn on_github(app: &mut crate::app::App) {
+    let t = serde_json::json!({ "provider": "github", "site": "acme/web", "key": "ENG" });
+    app.projects[0].tracker = Some(serde_json::from_value(t).unwrap());
+}
+
+/// A GitHub issue: its labels, assignees and the PRs that close it.
+#[test]
+fn github_issue_panel() {
+    let mut app = acme_app();
+    on_github(&mut app);
+    app.prefs.show_gh = false;
+    let tv = app.tickets.iter_mut().find(|tv| tv.t.key == "ENG-52").unwrap();
+    let issue = tv.jira.data.as_mut().unwrap();
+    issue.summary = "Login fails with SSO".into();
+    (issue.status, issue.status_category) = ("Open".into(), "new".into());
+    (issue.issue_type, issue.priority) = ("bug, auth".into(), String::new());
+    issue.assignee = "ana-example, ben-example".into();
+    issue.prs = vec![
+        crate::tracker::LinkedPr {
+            number: 45,
+            state: "OPEN".into(),
+            url: "https://github.com/acme/web/pull/45".into(),
+        },
+        crate::tracker::LinkedPr {
+            number: 40,
+            state: "CLOSED".into(),
+            url: "https://github.com/acme/web/pull/40".into(),
+        },
+    ];
+    draw(&mut app, 160, 40);
+    attach(&mut app, "ENG-52", SESSION);
+    assert_snapshot!(draw(&mut app, 160, 40));
+}
+
+/// The open issues, assigned to you first, under the Ticket field.
+#[test]
+fn add_form_listing_open_issues() {
+    let mut app = acme_app();
+    on_github(&mut app);
+    let issue = |number, title: &str, mine| crate::tracker::Listed {
+        key: format!("ENG-{number}"),
+        title: title.into(),
+        mine,
+    };
+    let list = vec![
+        issue(9, "Crash on start", true),
+        issue(15, "Fix the login form so that a long title is cut to fit the form's width", false),
+        issue(14, "Fix the search page", false),
+        issue(12, "Login fails with SSO", false),
+        issue(3, "Docs: explain setup", false),
+        issue(2, "Slow export", false),
+    ];
+    let listing = app.start_listing(0).unwrap();
+    app.open_issues_listed(listing, Ok(list));
+    app.on_key(crate::app::test_support::ctrl('a'));
+    app.on_key(key(KeyCode::Char('n')));
+    assert_snapshot!(draw(&mut app, 80, 30));
+}
+
+/// A Linear project's open issues, ↓ pressed past the fifth: the window scrolled to the
+/// highlight, with how many more are above and below it.
+#[test]
+fn add_form_picking_an_open_issue() {
+    let mut app = acme_app();
+    let titles = ["Fix the login page", "Export to CSV", "Slow search", "Crash on start"];
+    let list = (1..=9)
+        .map(|n: usize| crate::tracker::Listed {
+            key: format!("ENG-{}", 60 + n),
+            title: titles[n % titles.len()].into(),
+            mine: n == 1,
+        })
+        .collect();
+    let listing = app.start_listing(0).unwrap();
+    app.open_issues_listed(listing, Ok(list));
+    app.on_key(crate::app::test_support::ctrl('a'));
+    app.on_key(key(KeyCode::Char('n')));
+    for _ in 0..6 {
+        app.on_key(key(KeyCode::Down));
+    }
+    assert_snapshot!(draw(&mut app, 80, 30));
+}
+
+/// The terminal can shrink between the tick that laid the screen out and the draw: the frame's
+/// buffer is the new size, and the session's pane and its links are written into it directly, so
+/// the frame is laid out again from its own size.
+#[test]
+fn a_frame_smaller_than_the_layout_does_not_panic() {
+    use crate::app::test_support::lay_out;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let mut app = acme_app();
+    lay_out(&mut app, 160, 40);
+    attach(&mut app, "ENG-52", SESSION);
+    let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    term.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+    let claude = app.areas.claude;
+    assert!(claude.right() <= 80 && claude.bottom() <= 24, "{claude:?}");
+    // The session now fits its pane.
+    let s = app.tickets.iter().find(|tv| tv.t.key == "ENG-52").unwrap().session.as_ref().unwrap();
+    let size = crate::session::lock(&s.parser).screen().size();
+    assert_eq!(size, (claude.height, claude.width));
+}

@@ -1,0 +1,400 @@
+//! The sidebar: the projects, their cards, and the list's scrolling.
+
+use super::{dim, pr_spans, selection_bg, state_badge};
+use crate::app::{App, Hit, TicketView};
+use crate::keys::prefix;
+use crate::util::{fit_label, truncate};
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
+use unicode_width::UnicodeWidthStr;
+
+fn state_glyph(tv: &TicketView) -> Span<'static> {
+    let b = state_badge(tv);
+    let g: String = b.content.chars().next().unwrap_or(' ').to_string();
+    Span::styled(g, b.style)
+}
+
+/// How far the sidebar's list is scrolled. On `App` for the session only, never saved.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SidebarScroll {
+    /// The list row at the top of the view. Clamped to the list as it's drawn, so a resize or a
+    /// project folding never leaves room at the bottom while rows are hidden above.
+    pub top: usize,
+    /// The selection last scrolled into view, and whether the sidebar was folded then: when
+    /// either changes, the list scrolls again, just enough to show the selected card.
+    shown: Option<(usize, bool)>,
+    /// A card was selected since the last draw (`App::select`): shown then even when it was
+    /// selected already, after the wheel scrolled it out of view. A redraw alone keeps a
+    /// scroll made with the wheel.
+    pub asked: bool,
+}
+
+/// How many rows a wheel notch over the sidebar scrolls.
+pub const SIDEBAR_STEP: usize = 2;
+
+/// A row of the sidebar's list, the projects' headers and their cards, laid out whole before the
+/// view is cut out of it.
+struct SidebarRow {
+    line: Line<'static>,
+    hit: Option<Hit>,
+    selected: bool,
+    /// A card's row, or a folded project's header: what an edge row counts when it hides them.
+    entry: bool,
+    /// The row's ticket needs the user, or it's a folded project's header with one that does: an
+    /// edge row hiding it shows ●.
+    attention: bool,
+}
+
+pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::new().borders(Borders::RIGHT).border_style(dim());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    app.sidebar_hits.clear();
+    let collapsed = app.prefs.sidebar_collapsed || app.areas.sidebar_folded;
+
+    // The name, then the version in grey (a terminal can't do a smaller font); the version is
+    // dropped when the collapsed sidebar has no room for it.
+    let version = format!(" v{}", env!("CARGO_PKG_VERSION"));
+    let mut title = vec![Span::styled(" taskman", Style::new().bold())];
+    if inner.width as usize >= 8 + version.chars().count() {
+        title.push(Span::styled(version, dim()));
+    }
+    f.render_widget(Paragraph::new(Line::from(title)), Rect { height: 1, ..inner });
+    // A new release, on the line under the title.
+    if let Some(n) = app.updater.notice(app.config.auto_update)
+        && inner.height > 1
+    {
+        let room = (inner.width as usize).saturating_sub(1);
+        let text = truncate(&crate::update::notice_text(&n, room), room);
+        let line = Line::from(Span::styled(format!(" {text}"), Style::new().fg(Color::Cyan)));
+        f.render_widget(Paragraph::new(line), Rect { y: inner.y + 1, height: 1, ..inner });
+    }
+
+    // The list starts under the title and its notice, and keeps the sidebar's last row blank.
+    let view = Rect {
+        x: inner.x,
+        y: inner.y + 2,
+        width: inner.width,
+        height: inner.height.saturating_sub(3),
+    };
+    let w = inner.width as usize;
+    let rows = sidebar_rows(app, w, collapsed);
+    let view_h = view.height as usize;
+    let sel = app.sel;
+    let scroll = &mut app.sidebar_scroll;
+    if scroll.shown != Some((sel, collapsed)) || scroll.asked {
+        scroll.shown = Some((sel, collapsed));
+        scroll.asked = false;
+        let is_card = |r: &SidebarRow| r.hit == Some(Hit::Ticket(sel));
+        if let Some(start) = rows.iter().position(is_card) {
+            let end = start + rows[start..].iter().take_while(|r| is_card(r)).count();
+            // Its project's header comes along only when the card is the project's first, right
+            // under it: for any other, stepping up past the top edge would jump to the header
+            // each time and lose the user's place.
+            let header = rows[..start]
+                .iter()
+                .rposition(|r| r.hit.is_some())
+                .filter(|&h| matches!(rows[h].hit, Some(Hit::Project(_))));
+            scroll.top = scroll_to_show(scroll.top, rows.len(), view_h, start..end, header);
+        }
+    }
+    scroll.top = scroll.top.min(rows.len().saturating_sub(view_h));
+    let top = scroll.top;
+    let (first, end) = shown_rows(top, rows.len(), view_h);
+
+    // What an edge row stands for: the entries hidden past it, and whether one needs the user.
+    let hidden = |rows: &[SidebarRow]| {
+        let mut entries: Vec<Hit> = rows.iter().filter(|r| r.entry).filter_map(|r| r.hit).collect();
+        entries.dedup();
+        (entries.len(), rows.iter().any(|r| r.attention))
+    };
+    let above = (first > 0).then(|| hidden(&rows[..first]));
+    let below = (end < rows.len()).then(|| hidden(&rows[end..]));
+    let sel_bg = Style::new().bg(selection_bg());
+    let bottom = view.bottom();
+    let mut y = view.y;
+    if let Some((n, attention)) = above
+        && y < bottom
+    {
+        let r = Rect { y, height: 1, ..view };
+        f.render_widget(Paragraph::new(more_line("↑", n, attention, w)), r);
+        y += 1;
+    }
+    for row in rows.into_iter().skip(first).take(end - first) {
+        if y >= bottom {
+            break;
+        }
+        let r = Rect { y, height: 1, ..view };
+        let mut para = Paragraph::new(row.line);
+        if row.selected {
+            para = para.style(sel_bg);
+        }
+        f.render_widget(para, r);
+        // A card's rows make one hit, so clicks land on it wherever it's scrolled to.
+        if let Some(hit) = row.hit {
+            match app.sidebar_hits.last_mut() {
+                Some((rect, h)) if *h == hit && rect.bottom() == y => rect.height += 1,
+                _ => app.sidebar_hits.push((r, hit)),
+            }
+        }
+        y += 1;
+    }
+    if let Some((n, attention)) = below
+        && y < bottom
+    {
+        let r = Rect { y, height: 1, ..view };
+        f.render_widget(Paragraph::new(more_line("↓", n, attention, w)), r);
+    }
+}
+
+/// The sidebar's list: each project's header, then its cards, with the rows between them, as
+/// `draw_sidebar` lays them out `w` wide. Trailing blank rows are dropped, so the list ends on
+/// its last card.
+fn sidebar_rows(app: &App, w: usize, collapsed: bool) -> Vec<SidebarRow> {
+    let plain = |line: Line<'static>| SidebarRow {
+        line,
+        hit: None,
+        selected: false,
+        entry: false,
+        attention: false,
+    };
+    let blank = || plain(Line::default());
+    let visible = app.ordered(true);
+    let mut rows: Vec<SidebarRow> = Vec::new();
+    for (p, proj) in app.projects.iter().enumerate() {
+        let members = app.members(p);
+        // Group header: ▾ name   (folded: ▸ name (3) ……… ●)
+        let arrow = if proj.collapsed { "▸ " } else { "▾ " };
+        let count = if proj.collapsed { format!(" ({})", members.len()) } else { String::new() };
+        let waiting = proj.collapsed && members.iter().any(|&i| app.tickets[i].needs_attention());
+        // The ● ends one column from the edge, where the cards' badges end.
+        let room = w.saturating_sub(2 + count.chars().count() + if waiting { 3 } else { 0 });
+        let mut header = vec![
+            Span::styled(arrow, dim()),
+            Span::styled(truncate(&proj.name, room), Style::new().bold()),
+            Span::styled(count.clone(), dim()),
+        ];
+        if waiting {
+            let used = 2 + proj.name.chars().count().min(room) + count.chars().count();
+            header.push(Span::raw(" ".repeat(w.saturating_sub(used + 2).max(1))));
+            header.push(Span::styled("●", Style::new().fg(Color::Yellow).bold()));
+        }
+        rows.push(SidebarRow {
+            line: Line::from(header),
+            hit: Some(Hit::Project(p)),
+            selected: false,
+            entry: proj.collapsed,
+            attention: waiting,
+        });
+        if proj.collapsed {
+            rows.push(blank());
+            continue;
+        }
+        if !collapsed {
+            let rule = "─".repeat(w.saturating_sub(2));
+            rows.push(plain(Line::from(vec![Span::raw(" "), Span::styled(rule, dim())])));
+        }
+        if members.is_empty() {
+            if !collapsed {
+                let empty = if proj.tracker.is_some() {
+                    format!("   no tickets · {} n", prefix().short())
+                } else {
+                    format!("   no agents · {} n", prefix().short())
+                };
+                rows.push(plain(Line::from(Span::styled(empty, dim()))));
+            }
+            rows.push(blank());
+            continue;
+        }
+
+        for &i in &members {
+            let tv = &app.tickets[i];
+            let selected = i == app.sel;
+            let agent = tv.t.agent.is_some();
+            let title = if collapsed { None } else { tv.title() };
+            // ┃ joins across lines, so the selected card reads as one block.
+            let marker = if selected {
+                Span::styled("┃", Style::new().fg(Color::Cyan))
+            } else {
+                Span::raw(" ")
+            };
+            let key_style =
+                if selected { Style::new().fg(Color::Cyan).bold() } else { Style::new().bold() };
+            let num = match visible.iter().position(|&v| v == i) {
+                Some(n) if n < 9 => format!("{} ", n + 1),
+                _ => "  ".into(),
+            };
+            let mut lines: Vec<Line> = Vec::new();
+            if collapsed {
+                let label = if agent { format!("✦{}", tv.t.display()) } else { tv.t.key.clone() };
+                lines.push(Line::from(vec![
+                    marker,
+                    Span::styled(truncate(&label, w.saturating_sub(3)), key_style),
+                    Span::raw(" "),
+                    state_glyph(tv),
+                ]));
+            } else {
+                let badge = state_badge(tv);
+                let label =
+                    if agent { format!("✦ {}", tv.t.display()) } else { tv.t.key.clone() };
+                // The badge keeps its width and ends one column from the edge; the name gets
+                // the rest.
+                let badge_w = badge.content.width();
+                let label = fit_label(&label, w.saturating_sub(1 + num.len() + 1 + badge_w + 1));
+                let used = 1 + num.len() + label.width() + badge_w;
+                let pad = " ".repeat(w.saturating_sub(used + 1).max(1));
+                lines.push(Line::from(vec![
+                    marker.clone(),
+                    Span::styled(num, dim()),
+                    Span::styled(label, key_style),
+                    Span::raw(pad),
+                    badge,
+                ]));
+                let new = if selected { 0 } else { tv.new_count() };
+                if let Some(title) = &title {
+                    let title_style = if selected { Style::new() } else { dim() };
+                    let mut row = vec![marker.clone(), Span::raw("  ")];
+                    let mut room = w.saturating_sub(4);
+                    if new > 0 {
+                        let tag = format!("{new} new · ");
+                        room = room.saturating_sub(tag.chars().count());
+                        row.push(Span::styled(tag, Style::new().fg(Color::Yellow).bold()));
+                    }
+                    row.push(Span::styled(truncate(title, room), title_style));
+                    lines.push(Line::from(row));
+                }
+                // Agents have no PR line: a name, and a title when Claude has set one.
+                if !agent {
+                    let mut pr = vec![marker, Span::raw("  ")];
+                    if title.is_none() && new > 0 {
+                        pr.push(Span::styled(
+                            format!("{new} new · "),
+                            Style::new().fg(Color::Yellow).bold(),
+                        ));
+                    }
+                    pr.extend(pr_spans(app, tv));
+                    lines.push(Line::from(pr));
+                }
+            }
+            let attention = tv.needs_attention();
+            rows.extend(lines.into_iter().map(|line| SidebarRow {
+                line,
+                hit: Some(Hit::Ticket(i)),
+                selected,
+                entry: true,
+                attention,
+            }));
+            if !collapsed {
+                rows.push(blank());
+            }
+        }
+        if collapsed {
+            rows.push(blank());
+        }
+    }
+    while rows.last().is_some_and(|r| r.hit.is_none() && r.line.spans.is_empty()) {
+        rows.pop();
+    }
+    rows
+}
+
+/// The rows a view `view_h` tall shows of `total`, from row `top`: an edge row with rows beyond
+/// it says how many instead (`more_line`), so the content starts one row in at the top when
+/// scrolled and stops one row short at the bottom while the list goes on.
+fn shown_rows(top: usize, total: usize, view_h: usize) -> (usize, usize) {
+    let first = top + usize::from(top > 0);
+    let end = if top + view_h < total { (top + view_h).saturating_sub(1) } else { total };
+    (first.min(total), end.max(first).min(total))
+}
+
+/// The row to scroll to so that rows `want` (a card) show whole, with row `header` (its project's,
+/// given when the card is the project's first) above them when there's room, moving `top` only
+/// as far as that takes: not at all while the card is in view. A card taller than the view shows
+/// from its first row.
+fn scroll_to_show(
+    top: usize,
+    total: usize,
+    view_h: usize,
+    want: std::ops::Range<usize>,
+    header: Option<usize>,
+) -> usize {
+    let max_top = total.saturating_sub(view_h);
+    // The tops that show `want` whole: a contiguous run, as both edges move with the top.
+    let fitting = |want: std::ops::Range<usize>| {
+        let lo = (0..=max_top).find(|&t| shown_rows(t, total, view_h).1 >= want.end)?;
+        let hi = (0..=max_top).rev().find(|&t| shown_rows(t, total, view_h).0 <= want.start)?;
+        (lo <= hi).then_some((lo, hi))
+    };
+    let Some((lo, hi)) = fitting(want.clone()) else {
+        return want.start.saturating_sub(1).min(max_top);
+    };
+    if (lo..=hi).contains(&top) {
+        return top;
+    }
+    let (lo, hi) = header.and_then(|h| fitting(h..want.end)).unwrap_or((lo, hi));
+    top.clamp(lo, hi)
+}
+
+/// An edge row where the list goes on past the view: how many entries (cards, folded projects)
+/// are hidden there, the arrow alone when only an open project's header is, with ● when one of
+/// them needs the user.
+fn more_line(arrow: &str, entries: usize, attention: bool, w: usize) -> Line<'static> {
+    let text = if entries > 0 { format!(" {arrow} {entries} more") } else { format!(" {arrow}") };
+    let used = text.chars().count();
+    let mut spans = vec![Span::styled(text, dim())];
+    if attention {
+        spans.push(Span::raw(" ".repeat(w.saturating_sub(used + 2).max(1))));
+        spans.push(Span::styled("●", Style::new().fg(Color::Yellow).bold()));
+    }
+    Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_edge_rows_stand_for_the_rows_hidden_past_them() {
+        // Everything fits: no edge rows.
+        assert_eq!(shown_rows(0, 10, 20), (0, 10));
+        assert_eq!(shown_rows(0, 20, 20), (0, 20));
+        // Scrolled: the top row says what's above and the bottom row what's below, while there
+        // is something.
+        assert_eq!(shown_rows(0, 30, 20), (0, 19));
+        assert_eq!(shown_rows(5, 30, 20), (6, 24));
+        assert_eq!(shown_rows(10, 30, 20), (11, 30));
+        // A view too small for its edge rows shows nothing rather than overflowing.
+        assert_eq!(shown_rows(5, 30, 1), (6, 6));
+        assert_eq!(shown_rows(5, 30, 0), (6, 6));
+        assert_eq!(shown_rows(0, 30, 0), (0, 0));
+    }
+
+    #[test]
+    fn sidebar_scrolls_just_enough_to_show_the_selection() {
+        // 50 rows, 20 in view; the card at rows 30..33 under its project's header at row 20.
+        let to =
+            |top, want: std::ops::Range<usize>, header| scroll_to_show(top, 50, 20, want, header);
+        // Below the view: the card ends on the row above the "more" row.
+        assert_eq!(to(0, 30..33, Some(20)), 14);
+        // In view already: nothing moves, header shown or not.
+        assert_eq!(to(14, 30..33, Some(20)), 14);
+        assert_eq!(to(25, 30..33, Some(20)), 25);
+        // Above the view: the card starts under the "more" row ...
+        assert_eq!(to(40, 30..33, None), 29);
+        // ... with its header above it when it's the project's first and there's room.
+        assert_eq!(to(40, 30..33, Some(20)), 19);
+        assert_eq!(to(40, 30..33, Some(5)), 29);
+        // The first card: the list starts at the top, no "more" row above.
+        assert_eq!(to(40, 1..4, Some(0)), 0);
+        // The last card: the list ends at the bottom, no "more" row below.
+        assert_eq!(to(0, 47..50, Some(20)), 30);
+        // A card taller than the view shows from its first row.
+        assert_eq!(scroll_to_show(0, 50, 3, 30..33, None), 29);
+        assert_eq!(shown_rows(29, 50, 3), (30, 31));
+        // A list that fits never scrolls.
+        assert_eq!(scroll_to_show(0, 10, 20, 6..9, Some(0)), 0);
+    }
+}

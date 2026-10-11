@@ -1,0 +1,21 @@
+{
+  "id": "10053",
+  "key": "ENG-53",
+  "fields": {
+    "summary": "Import CSV",
+    "status": { "name": "To Do", "statusCategory": { "key": "new" } },
+    "issuetype": { "name": "Story" },
+    "priority": null,
+    "assignee": null,
+    "description": null,
+    "comment": {
+      "startAt": 0,
+      "maxResults": 2,
+      "total": 150,
+      "comments": [
+        { "id": "1", "author": { "displayName": "Ana Example" }, "created": "2024-01-01T09:00:00.000+0000", "body": "oldest" },
+        { "id": "2", "author": { "displayName": "Ana Example" }, "created": "2024-01-02T09:00:00.000+0000", "body": "second oldest" }
+      ]
+    }
+  }
+}

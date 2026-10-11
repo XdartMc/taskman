@@ -1,0 +1,73 @@
+{
+  "projects": [
+    {
+      "name": "acme",
+      "repo": "/src/acme",
+      "tracker": {
+        "provider": "jira",
+        "site": "https://example.atlassian.net",
+        "key": "ENG",
+        "account": "jira-1"
+      },
+      "collapsed": false
+    },
+    {
+      "name": "web",
+      "repo": "/src/web",
+      "tracker": {
+        "provider": "linear",
+        "site": "acme",
+        "key": "WEB"
+      },
+      "collapsed": true
+    },
+    {
+      "name": "notes",
+      "repo": "/src/notes",
+      "tracker": null,
+      "collapsed": false
+    }
+  ],
+  "tickets": [
+    {
+      "key": "ENG-52",
+      "repo": "/src/acme",
+      "cwd": "/src/acme-ENG-52",
+      "branch": "eng-52-login",
+      "session_id": "sid-52",
+      "seen_jira": [
+        "10001"
+      ],
+      "seen_gh": [
+        "c:7",
+        "r:9"
+      ]
+    },
+    {
+      "key": "acme-lead",
+      "repo": "/src/acme",
+      "cwd": "/src/acme",
+      "branch": null,
+      "session_id": "sid-lead",
+      "seen_jira": null,
+      "seen_gh": null,
+      "agent": "lead"
+    },
+    {
+      "key": "WEB-7",
+      "repo": "/src/web",
+      "cwd": "/src/web",
+      "branch": null,
+      "session_id": null,
+      "seen_jira": null,
+      "seen_gh": null
+    }
+  ],
+  "selected": 1,
+  "ui": {
+    "sidebar_collapsed": false,
+    "show_jira": true,
+    "show_comments": false,
+    "show_gh": true
+  }
+}

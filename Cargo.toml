@@ -1,0 +1,63 @@
+[package]
+name = "taskman-app"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A terminal UI for working on several tickets at once, each with its own Claude Code or Codex session"
+repository = "https://github.com/sanagnos/taskman"
+homepage = "https://github.com/sanagnos/taskman"
+readme = "README.md"
+keywords = ["tui", "claude", "jira", "linear", "worktree"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.88"
+include = ["src/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE-*"]
+
+# cargo-binstall installs from the release archives: taskman-vX.Y.Z-<target>.tar.gz holding just
+# the binary. Their names must stay stable anyway, as installed copies update from them.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/taskman-v{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
+
+[[bin]]
+name = "taskman"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+crossterm = "0.29"
+filedescriptor = "0.8.3"
+libc = "0.2.190"
+portable-pty = "0.9"
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+signal-hook = "0.4.5"
+tui-term = "0.3"
+unicode-width = "0.2.2"
+ureq = { version = "3.4.2", features = ["json"] }
+vt100 = "0.16"
+
+[lints.clippy]
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+unchecked_time_subtraction = "warn"
+redundant_closure = "warn"
+needless_pass_by_value = "warn"
+semicolon_if_nothing_returned = "warn"
+undocumented_unsafe_blocks = "warn"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+# vt100 with OSC 8 hyperlinks kept per cell and erased cells keeping only the background colour;
+# tui-term uses it too. Upstream is dormant, so expect the fork to stay. It's also why taskman
+# isn't on crates.io: a published crate can't depend on a git fork.
+[patch.crates-io]
+vt100 = { git = "https://github.com/sanagnos/vt100-rust", rev = "3bae3d349d670e78c33b0f4ae5d67f4478747d45" }
+
+[dev-dependencies]
+insta = { version = "1.49.0", default-features = false }
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }

@@ -1,0 +1,65 @@
+name: Bug report
+description: Something in taskman doesn't work as it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. A security problem? Please report it privately instead (see SECURITY.md).
+        Leave out tokens, and any ticket, PR or company names you can't share: `ENG-52` and `acme` are fine stand-ins.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead. Screenshots or `tmux capture-pane` output help.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Add a Linear project with...
+        2. Press ctrl+a ...
+  - type: input
+    id: taskman
+    attributes:
+      label: taskman version
+      description: "`taskman --version`"
+      placeholder: taskman X.Y.Z
+    validations:
+      required: true
+  - type: input
+    id: cli
+    attributes:
+      label: Claude Code or Codex version
+      description: "`claude --version`, or `codex --version` if the session runs in Codex"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: macOS 15.5 (Apple Silicon), Ubuntu 24.04, Windows 11 with WSL (Ubuntu 22.04)
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      description: The terminal and its size, and tmux or screen if taskman runs inside one.
+      placeholder: Windows Terminal 1.22, 160x45, inside tmux 3.4
+    validations:
+      required: true
+  - type: dropdown
+    id: tracker
+    attributes:
+      label: Tracker
+      multiple: true
+      options: [None, Jira, Linear, Local files]
+  - type: textarea
+    id: logs
+    attributes:
+      label: Anything else
+      description: "Errors from `~/.local/state/taskman/panics.log`, your config without its token sources, or whatever else might help."
+      render: text

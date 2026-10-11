@@ -1,0 +1,1 @@
+{ "data": { "issue": { "comments": { "nodes": [{ "id": "c-0c" }, { "id": "c-0b" }, { "id": "c-0a" }], "pageInfo": { "hasNextPage": true, "endCursor": "cursor-2" } } } } }

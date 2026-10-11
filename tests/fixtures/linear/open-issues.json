@@ -1,0 +1,13 @@
+{
+  "data": {
+    "viewer": { "id": "user-ana" },
+    "issues": {
+      "nodes": [
+        { "identifier": "ENG-71", "title": "Export to CSV", "assignee": null },
+        { "identifier": "ENG-64", "title": "Fix the login page", "assignee": { "id": "user-ana" } },
+        { "identifier": "ENG-58", "title": "Slow search", "assignee": { "id": "user-ben" } },
+        { "identifier": "ENG-12", "title": "Crash on start", "assignee": { "id": "user-ana" } }
+      ]
+    }
+  }
+}

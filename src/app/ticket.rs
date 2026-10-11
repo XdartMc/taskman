@@ -1,0 +1,591 @@
+//! One ticket or agent as the TUI holds it (`TicketView`): its session, its state, its fetched
+//! tracker and PR panels, and which of their comments are new.
+
+use super::poll::StatusRecord;
+use super::sync::STALE;
+use super::{AgentState, Remote, Status};
+use crate::github::{self, Pr};
+use crate::resume;
+use crate::session::{Reaper, Session};
+use crate::store::{Ticket, UiPrefs};
+use crate::tracker::Issue;
+use crate::worktree;
+use std::path::PathBuf;
+use std::time::{Instant, SystemTime};
+
+/// A session that runs, or ran, in another terminal instead of the pane (`ctrl+a t`, `taskman
+/// resume`). It's never started in the pane by itself while it's away: Enter brings it back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Away {
+    /// `ctrl+a t` asked the CLI to quit; it's handed off once it has.
+    Leaving(Instant),
+    /// Handed off, and `taskman resume` hasn't picked it up.
+    HandedOff,
+    /// Running in another terminal; its hooks still report its state.
+    Outside,
+    /// It ran in another terminal and ended there.
+    Back,
+}
+
+pub struct TicketView {
+    pub t: Ticket,
+    pub session: Option<Session>,
+    /// Its last session's CLI, still being hung up and reaped (`stop_session`). Until it's gone,
+    /// no session starts in its place, its claim isn't let go and its folder isn't removed: see
+    /// "Stopping a session" in docs/design.md.
+    pub(super) reaper: Option<Reaper>,
+    pub status: Status,
+    pub jira: Remote<Issue>,
+    pub pr: Remote<Option<Pr>>,
+    /// When no PR is shown: the newest one closed without merging, for a note.
+    pub closed_pr: Option<u64>,
+    pub jira_scroll: u16,
+    pub gh_scroll: u16,
+    /// Modification times of the hook's "Claude touched Jira / GitHub" signal files.
+    pub(super) jira_signal: Option<SystemTime>,
+    pub(super) gh_signal: Option<SystemTime>,
+    /// A Local files ticket's file and its modification time when last read; the panel rereads
+    /// it when either changes.
+    pub local_file: Option<(PathBuf, Option<SystemTime>)>,
+    /// Its worktree is being created; the session starts once it's there.
+    pub creating: bool,
+    /// The thread creating it.
+    pub(super) creation: Option<std::thread::JoinHandle<()>>,
+    /// The creation's id, which its result carries (`Msg::Worktree`): a result for an earlier
+    /// creation, from before the ticket closed and was added again, isn't this one's.
+    pub(super) creation_id: u64,
+    /// Added by `taskman add` and not selected since; the sidebar marks it.
+    pub new: bool,
+    /// An agent `taskman add` just added: its session starts without being selected, so the
+    /// agent that added it can message it.
+    pub(super) start: bool,
+    /// The name its session started with (`--name`), which can be the plain key while another
+    /// project's ticket has the same key (see `store::session_name`).
+    pub(super) name: Option<String>,
+    /// The claim on its session while the pane runs it, so `taskman resume` can't start a second
+    /// copy.
+    pub(super) hold: Option<resume::Hold>,
+    /// Which start of its session the pane runs (`launch::launch_id`), which its hooks' records
+    /// name; see `takes`.
+    pub(super) launch: Option<String>,
+    /// Why its session didn't start the last time it was tried: the owner lock couldn't be taken
+    /// (`start_session`), as "<file>: <error>". Enter tries again.
+    pub lock_error: Option<String>,
+    pub away: Option<Away>,
+    /// Another session's conversation id its hooks reported and it wasn't given, once told.
+    pub(super) switched: Option<String>,
+}
+
+/// What adding a ticket or agent found: it was already open, or is new; its index either way.
+pub(super) enum Added {
+    Open(usize),
+    New(usize),
+}
+
+impl TicketView {
+    pub(super) fn new(t: Ticket) -> Self {
+        Self {
+            t,
+            session: None,
+            reaper: None,
+            status: Status::new(),
+            jira: Remote::new(),
+            pr: Remote::new(),
+            closed_pr: None,
+            jira_scroll: 0,
+            gh_scroll: 0,
+            jira_signal: None,
+            gh_signal: None,
+            local_file: None,
+            creating: false,
+            creation: None,
+            creation_id: 0,
+            new: false,
+            start: false,
+            name: None,
+            hold: None,
+            launch: None,
+            lock_error: None,
+            away: None,
+            switched: None,
+        }
+    }
+
+    /// Its session waits for a worktree: being created, or failed until the user retries or
+    /// chooses the main checkout.
+    pub fn waiting(&self) -> bool {
+        self.creating || self.t.pending_worktree.is_some()
+    }
+
+    /// Stops its session, if it has one: the CLI is hung up and reaped on a thread
+    /// (`Session::stop`), kept as `reaper` while it runs. A session only starts once the last
+    /// one's CLI is gone (`start_session`), so there's at most one to keep.
+    pub(super) fn stop_session(&mut self) {
+        if let Some(reaper) = self.session.take().and_then(Session::stop) {
+            self.reaper = Some(reaper);
+        }
+    }
+
+    /// Whether its last session's CLI is still on its way out: hung up, but not reaped yet.
+    pub fn reaping(&self) -> bool {
+        self.reaper.as_ref().is_some_and(|r| !r.done())
+    }
+
+    /// Takes its reaper, for whoever must wait for the CLI off the UI thread.
+    pub(super) fn take_reaper(&mut self) -> Option<Reaper> {
+        self.reaper.take().filter(|r| !r.done())
+    }
+
+    /// Handed off (`ctrl+a t`): lets its claim go once its CLI is gone, not before, so `taskman
+    /// resume` can't start a second copy on the conversation the pane's CLI is still ending. The
+    /// owner file says `handed-off` already, which held reads as `Owner::Stopping`. From
+    /// `handed_off` and then from every poll, until it's let go.
+    pub(super) fn release_handed_off(&mut self) {
+        if self.away == Some(Away::HandedOff) && !self.reaping() {
+            self.hold = None;
+        }
+    }
+
+    fn jira_ids(&self) -> Option<Vec<String>> {
+        self.jira.data.as_ref().map(|i| i.comments.iter().map(|c| c.id.clone()).collect())
+    }
+
+    fn gh_ids(&self) -> Option<Vec<String>> {
+        self.pr.data.as_ref().map(|pr| match pr {
+            Some(pr) => pr
+                .comments
+                .iter()
+                .map(|c| format!("c:{}", c.id))
+                .chain(pr.latest_reviews().into_iter().map(|r| format!("r:{}", r.id)))
+                .collect(),
+            None => Vec::new(),
+        })
+    }
+
+    pub fn is_new_jira(&self, id: &str) -> bool {
+        self.t.seen_jira.as_ref().is_some_and(|seen| !seen.iter().any(|s| s == id))
+    }
+
+    /// `prefixed_id` is `c:<comment id>` or `r:<review id>`.
+    pub fn is_new_gh(&self, prefixed_id: &str) -> bool {
+        self.t.seen_gh.as_ref().is_some_and(|seen| !seen.iter().any(|s| s == prefixed_id))
+    }
+
+    /// Jira comments plus PR comments and reviews that arrived since the ticket was last viewed.
+    pub fn new_count(&self) -> usize {
+        let j =
+            self.jira_ids().unwrap_or_default().iter().filter(|id| self.is_new_jira(id)).count();
+        let g = self.gh_ids().unwrap_or_default().iter().filter(|id| self.is_new_gh(id)).count();
+        j + g
+    }
+
+    /// The first fetch for a ticket counts everything already there as seen.
+    pub(super) fn baseline_seen(&mut self) -> bool {
+        let mut changed = false;
+        if self.t.seen_jira.is_none()
+            && let Some(ids) = self.jira_ids()
+        {
+            self.t.seen_jira = Some(ids);
+            changed = true;
+        }
+        if self.t.seen_gh.is_none()
+            && let Some(ids) = self.gh_ids()
+        {
+            self.t.seen_gh = Some(ids);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Marks as seen what the panels showed: Jira comments only if the Jira panel and its
+    /// comments were visible, PR comments and reviews only if the GitHub panel was.
+    pub(super) fn mark_seen(&mut self, prefs: &UiPrefs) {
+        if prefs.show_jira
+            && prefs.show_comments
+            && let Some(ids) = self.jira_ids()
+        {
+            self.t.seen_jira = Some(ids);
+        }
+        if prefs.show_gh
+            && let Some(ids) = self.gh_ids()
+        {
+            self.t.seen_gh = Some(ids);
+        }
+    }
+
+    /// Whether a status record is this session's. A CLI runs its SessionEnd hook on the hangup
+    /// that stops it, so a record of an earlier start can land after a restart's new session is
+    /// running, or after the ticket closed and was added again; taken, it would show the new
+    /// session as ended, or hand the new ticket the old conversation to resume. So the hooks
+    /// write the start they belong to (`TASKMAN_LAUNCH`), and the pane takes only its own start's
+    /// records. Outside (`taskman resume`), or back from there, whatever the hooks write is the
+    /// session's; with no session anywhere, nothing is.
+    pub(super) fn takes(&self, rec: &StatusRecord) -> bool {
+        match (&self.session, &rec.launch) {
+            (Some(_), Some(launch)) => self.launch.as_ref() == Some(launch),
+            // An older hook writes no start.
+            (Some(_), None) => true,
+            (None, _) => self.away.is_some(),
+        }
+    }
+
+    /// What the session's hook reported, `selected` saying whether the user is looking at it.
+    /// Returns whether to ring the bell: it waits on the user, out of sight.
+    pub(super) fn hook_reported(&mut self, rec: StatusRecord, selected: bool) -> bool {
+        let state = rec.state;
+        let mut bell = false;
+        if state != self.status.state {
+            // Claude finished a turn: whatever it did may have changed the ticket or PR.
+            if state == AgentState::Done {
+                self.jira.request_if_older_than(STALE, false);
+                self.pr.request_if_older_than(STALE, false);
+            }
+            if !selected && matches!(state, AgentState::Needs | AgentState::Done) {
+                self.status.seen = false;
+                bell = state == AgentState::Needs;
+            }
+            self.status.state = state;
+        }
+        self.status.message = rec.message;
+        self.status.permission = rec.permission;
+        bell
+    }
+
+    /// What a PR lookup found (`pr_lookup`), with the worktree git found for the ticket: shows
+    /// the PR, adopts an open PR's branch or forgets a remembered branch that's gone, and moves a
+    /// session that never started into the worktree, unless taskman created one for the ticket
+    /// already. Returns whether the ticket changed.
+    pub(super) fn take_pr(
+        &mut self,
+        res: Result<github::Lookup, String>,
+        worktree: Option<(PathBuf, String)>,
+    ) -> bool {
+        let mut changed = false;
+        let res = res.map(|found| {
+            // Adopt an open PR's branch; forget a remembered branch that's gone.
+            if let Some(p) = &found.pr
+                && p.state == "OPEN"
+                && self.t.branch.is_none()
+            {
+                self.t.branch = Some(p.head.clone());
+                changed = true;
+            }
+            if found.branch_gone && worktree.is_none() && self.t.branch.is_some() {
+                self.t.branch = None;
+                changed = true;
+            }
+            // Keep the note after the branch is forgotten, until a PR replaces it.
+            if found.pr.is_some() {
+                self.closed_pr = None;
+            } else if found.closed.is_some() {
+                self.closed_pr = found.closed;
+            }
+            found.pr
+        });
+        self.pr.finish(res);
+        changed |= self.baseline_seen();
+        if let Some((path, branch)) = worktree {
+            // The worktree taskman created stays the ticket's, whatever git finds for the key
+            // later (a workflow's `change/ENG-52`, which the lookup prefers): closing offers to
+            // remove the ticket's worktree with its branch, and that must never be one taskman
+            // didn't make. So neither the folder nor the branch moves there, and
+            // `created_worktree` never comes to describe another folder.
+            let another = self.t.created_worktree && !worktree::same_path(&self.t.cwd, &path);
+            if !another && self.t.branch.as_deref() != Some(branch.as_str()) {
+                self.t.branch = Some(branch);
+                changed = true;
+            }
+            // A session that has never started can start in the worktree directly.
+            if !another
+                && self.session.is_none()
+                && self.t.session_id.is_none()
+                && self.t.cwd != path
+            {
+                self.t.cwd = path;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    pub fn needs_attention(&self) -> bool {
+        // Outside, it can still be waiting on you; handed off or back, it waits for Enter alone.
+        match self.away {
+            Some(Away::Outside) if self.status.state == AgentState::Exited => return false,
+            Some(Away::Leaving(_) | Away::HandedOff | Away::Back) => return false,
+            _ => {}
+        }
+        match self.status.state {
+            AgentState::Needs => true,
+            AgentState::Done | AgentState::Exited => !self.status.seen,
+            _ => false,
+        }
+    }
+
+    /// A title worth showing: the tracker summary, or Claude's window title without its status
+    /// glyph. None when there's only something generic like "Claude Code".
+    pub fn title(&self) -> Option<String> {
+        if let Some(i) = &self.jira.data
+            && !i.summary.trim().is_empty()
+        {
+            return Some(i.summary.clone());
+        }
+        let raw = self.window_title();
+        let t = raw.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+        let generic = ["Claude Code", "Claude", "Continued conversation", "New conversation"];
+        // Claude titles the window with the session's --name, which the card already shows.
+        let own_name = t.eq_ignore_ascii_case(&self.t.key);
+        (!t.is_empty() && !own_name && !generic.iter().any(|g| t.eq_ignore_ascii_case(g)))
+            .then(|| t.to_string())
+    }
+
+    /// The session's window title, without the folder Codex adds: it titles the window
+    /// "<thread name> | <folder>", or just the folder before the first turn.
+    pub fn window_title(&self) -> String {
+        let raw = self.session.as_ref().map(|s| s.title()).unwrap_or_default();
+        let dir =
+            self.t.cwd.file_name().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+        strip_folder(&raw, &dir).to_string()
+    }
+}
+
+fn strip_folder<'a>(title: &'a str, dir: &str) -> &'a str {
+    if !dir.is_empty() && title.trim() == dir {
+        return "";
+    }
+    title.strip_suffix(&format!(" | {dir}")).unwrap_or(title)
+}
+
+/// Whether closing `tv` may remove its worktree: one taskman created, never the main checkout.
+pub(super) fn own_worktree(tv: &TicketView) -> bool {
+    tv.t.created_worktree && tv.t.cwd != tv.t.repo
+}
+
+/// The head commit of the ticket's merged PR, which vouches for the commits it merged.
+pub(super) fn merged_head(tv: &TicketView) -> Option<String> {
+    match &tv.pr.data {
+        Some(Some(pr)) if pr.state == "MERGED" && !pr.head_oid.is_empty() => {
+            Some(pr.head_oid.clone())
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::poll::parse_status;
+    use crate::app::test_support::{ago, ticket};
+    use crate::github::Lookup;
+    use std::path::Path;
+    use std::time::Duration;
+
+    #[test]
+    fn strips_codex_folder_from_titles() {
+        assert_eq!(strip_folder("⠇ Fix login | acme", "acme"), "⠇ Fix login");
+        assert_eq!(strip_folder("acme", "acme"), "");
+        assert_eq!(strip_folder("✳ Fix login", "acme"), "✳ Fix login");
+        assert_eq!(strip_folder("Fix login", ""), "Fix login");
+    }
+
+    fn pr(state: &str, head: &str) -> Pr {
+        Pr {
+            number: 15,
+            title: String::new(),
+            url: String::new(),
+            state: state.into(),
+            is_draft: false,
+            review_decision: String::new(),
+            mergeable: String::new(),
+            head: head.into(),
+            head_oid: String::new(),
+            base: "main".into(),
+            checks: vec![],
+            reviews: vec![],
+            comments: vec![],
+            threads: Ok(Default::default()),
+        }
+    }
+
+    fn found(pr: Option<Pr>, closed: Option<u64>, branch_gone: bool) -> Result<Lookup, String> {
+        Ok(Lookup { pr, closed, branch_gone })
+    }
+
+    #[test]
+    fn adopts_and_forgets_branches_from_pr_lookups() {
+        let mut tv = TicketView::new(ticket());
+        // An open PR's branch becomes the ticket's.
+        assert!(tv.take_pr(found(Some(pr("OPEN", "eng-52-login")), None, false), None));
+        assert_eq!(tv.t.branch.as_deref(), Some("eng-52-login"));
+        assert_eq!(tv.pr.data.as_ref().map(|p| p.as_ref().map(|p| p.number)), Some(Some(15)));
+        // Once it has one, another PR's head doesn't replace it.
+        assert!(!tv.take_pr(found(Some(pr("OPEN", "other")), None, false), None));
+        assert_eq!(tv.t.branch.as_deref(), Some("eng-52-login"));
+        // A failed lookup keeps what the panel showed.
+        assert!(!tv.take_pr(Err("gh: offline".into()), None));
+        assert!(tv.pr.data.as_ref().is_some_and(Option::is_some));
+        assert_eq!(tv.pr.error.as_deref(), Some("gh: offline"));
+        // The branch is gone and its PR was closed: forget the branch, keep a note of the PR,
+        // even after the branch is forgotten, until a PR replaces it.
+        assert!(tv.take_pr(found(None, Some(14), true), None));
+        assert_eq!((tv.t.branch.as_deref(), tv.closed_pr), (None, Some(14)));
+        assert!(!tv.take_pr(found(None, None, false), None));
+        assert_eq!(tv.closed_pr, Some(14));
+        assert!(tv.take_pr(found(Some(pr("OPEN", "eng-52-again")), None, false), None));
+        assert_eq!(tv.closed_pr, None);
+        // A worktree git found names the branch, even one that looks gone, and a session that
+        // never started moves into it.
+        let wt = || Some((PathBuf::from("/src/acme-ENG-52"), "eng-52-wt".to_string()));
+        assert!(tv.take_pr(found(None, None, true), wt()));
+        assert_eq!(tv.t.branch.as_deref(), Some("eng-52-wt"));
+        assert_eq!(tv.t.cwd, Path::new("/src/acme-ENG-52"));
+        assert!(!tv.take_pr(found(None, None, true), wt()), "already there");
+        // One that ran stays where its conversation is.
+        let mut tv = TicketView::new(Ticket { session_id: Some("sid".into()), ..ticket() });
+        assert!(tv.take_pr(found(None, None, false), wt()));
+        assert_eq!(
+            (tv.t.cwd.as_path(), tv.t.branch.as_deref()),
+            (Path::new("/src/acme"), Some("eng-52-wt"))
+        );
+    }
+
+    /// A worktree a workflow adds on `change/ENG-52` is what the lookup prefers, but the one
+    /// taskman created for the ticket stays the ticket's: closing may remove that one, with its
+    /// branch, and must never remove the workflow's.
+    #[test]
+    fn a_worktree_taskman_created_stays_the_tickets() {
+        let own = Ticket {
+            cwd: "/src/acme-ENG-52".into(),
+            branch: Some("eng-52-login".into()),
+            created_worktree: true,
+            ..ticket()
+        };
+        let mut tv = TicketView::new(own.clone());
+        // The first lookup counts what's there as seen; the worktree's effect is what's checked.
+        tv.take_pr(found(None, None, false), None);
+        let other = || Some((PathBuf::from("/src/wf/ENG-52"), "change/ENG-52".to_string()));
+        assert!(!tv.take_pr(found(None, None, false), other()));
+        assert_eq!(
+            (tv.t.cwd.as_path(), tv.t.branch.as_deref(), tv.t.created_worktree),
+            (Path::new("/src/acme-ENG-52"), Some("eng-52-login"), true)
+        );
+        // Its own worktree, listed again with a renamed branch, is still its own.
+        let renamed = || Some((PathBuf::from("/src/acme-ENG-52"), "eng-52-login-v2".to_string()));
+        assert!(tv.take_pr(found(None, None, false), renamed()));
+        assert_eq!(tv.t.branch.as_deref(), Some("eng-52-login-v2"));
+        assert!(tv.t.created_worktree);
+        // Without one of its own, the ticket moves there, and the folder isn't taskman's.
+        let mut tv =
+            TicketView::new(Ticket { created_worktree: false, cwd: "/src/acme".into(), ..own });
+        assert!(tv.take_pr(found(None, None, false), other()));
+        assert_eq!(
+            (tv.t.cwd.as_path(), tv.t.branch.as_deref(), tv.t.created_worktree),
+            (Path::new("/src/wf/ENG-52"), Some("change/ENG-52"), false)
+        );
+    }
+
+    fn comment(id: &str) -> crate::tracker::Comment {
+        crate::tracker::Comment {
+            id: id.into(),
+            author: String::new(),
+            created: String::new(),
+            body: String::new(),
+        }
+    }
+
+    fn with_activity(comments: &[&str], reviews: &[(&str, &str)]) -> Pr {
+        let mut p = pr("OPEN", "eng-52");
+        p.comments = comments
+            .iter()
+            .map(|id| crate::github::PrComment {
+                id: id.to_string(),
+                author: String::new(),
+                when: String::new(),
+                body: String::new(),
+                url: String::new(),
+            })
+            .collect();
+        p.reviews = reviews
+            .iter()
+            .map(|(id, author)| crate::github::Review {
+                id: id.to_string(),
+                author: author.to_string(),
+                state: "COMMENTED".into(),
+                when: String::new(),
+                body: String::new(),
+                url: String::new(),
+            })
+            .collect();
+        p
+    }
+
+    #[test]
+    fn counts_what_arrived_since_the_panels_last_showed() {
+        let mut tv = TicketView::new(ticket());
+        assert_eq!(tv.new_count(), 0, "nothing fetched, nothing new");
+        // The first fetch counts what's there as seen.
+        tv.jira.finish(Ok(Issue {
+            comments: vec![comment("c1"), comment("c2")],
+            ..Default::default()
+        }));
+        tv.pr.finish(Ok(Some(with_activity(&["p1"], &[("r1", "alice")]))));
+        assert!(tv.baseline_seen());
+        assert!(!tv.baseline_seen(), "only once");
+        assert_eq!(tv.new_count(), 0);
+        // A comment on each side, and a review from someone new.
+        tv.jira.finish(Ok(Issue {
+            comments: vec![comment("c3"), comment("c1"), comment("c2")],
+            ..Default::default()
+        }));
+        tv.pr.finish(Ok(Some(with_activity(&["p2", "p1"], &[("r1", "alice"), ("r2", "bob")]))));
+        assert_eq!(tv.new_count(), 3);
+        assert!(tv.is_new_jira("c3") && !tv.is_new_jira("c1"));
+        assert!(tv.is_new_gh("c:p2") && tv.is_new_gh("r:r2") && !tv.is_new_gh("r:r1"));
+        // Only what showed is marked: the tracker panel without its comments marks none of them.
+        let mut prefs = UiPrefs { show_comments: false, ..Default::default() };
+        tv.mark_seen(&prefs);
+        assert_eq!(tv.new_count(), 1);
+        prefs.show_comments = true;
+        tv.mark_seen(&prefs);
+        assert_eq!(tv.new_count(), 0);
+    }
+
+    #[test]
+    fn hooks_set_the_state_and_who_should_look() {
+        let rec = |state: &str| {
+            parse_status(&format!(r#"{{"state":"{state}","message":"Run the build","ts":1}}"#))
+                .unwrap()
+        };
+        // Out of sight, waiting on the user: unseen, and the bell rings.
+        let mut tv = TicketView::new(ticket());
+        assert!(tv.hook_reported(rec("needs"), false));
+        assert_eq!(
+            (tv.status.state, tv.status.seen, tv.status.message.as_str()),
+            (AgentState::Needs, false, "Run the build")
+        );
+        // On screen, the user sees it already.
+        let mut tv = TicketView::new(ticket());
+        assert!(!tv.hook_reported(rec("needs"), true));
+        assert!(tv.status.seen);
+        // The same state again changes nothing about who looked.
+        tv.status.seen = true;
+        assert!(!tv.hook_reported(rec("needs"), false));
+        assert!(tv.status.seen);
+        // A finished turn: unseen without a bell, and the panels refresh what's older than STALE.
+        let mut tv = TicketView::new(ticket());
+        tv.jira.start(1);
+        tv.jira.finish(Ok(Issue::default()));
+        tv.pr.start(2);
+        tv.pr.finish(Ok(None));
+        tv.pr.fetched_at = ago(STALE.as_secs_f32() + 1.0);
+        let hour = Duration::from_secs(3600);
+        assert!(!tv.hook_reported(rec("done"), false));
+        assert_eq!((tv.status.state, tv.status.seen), (AgentState::Done, false));
+        assert!(!tv.jira.due(hour) && tv.pr.due(hour));
+        // Only a permission prompt is one a key answers.
+        let permission =
+            parse_status(r#"{"state":"needs","reason":"permission","message":"","ts":1}"#).unwrap();
+        tv.hook_reported(permission, false);
+        assert!(tv.status.permission);
+    }
+}

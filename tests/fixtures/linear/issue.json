@@ -1,0 +1,21 @@
+{
+  "data": {
+    "issue": {
+      "identifier": "ENG-52",
+      "title": "Fix the login page",
+      "description": "## Steps\n* Sign in with **SSO**\n* See [the redirect](https://example.com/login) loop\n\nRuns `GET /login`.",
+      "priorityLabel": "High",
+      "branchName": "ana/eng-52-fix-the-login-page",
+      "state": { "name": "In Progress", "type": "started" },
+      "assignee": { "name": "ana", "displayName": "Ana Example" },
+      "labels": { "nodes": [{ "name": "Bug" }, { "name": "Auth" }] },
+      "comments": {
+        "nodes": [
+          { "id": "c-2", "body": "Fixed by clearing the cookie.", "createdAt": "2024-03-02T10:30:00.000Z", "user": { "name": "ben", "displayName": "Ben Example" } },
+          { "id": "c-1", "body": "Seen on **staging**.", "createdAt": "2024-03-01T09:00:00.000Z", "user": { "name": "ana", "displayName": "Ana Example" } }
+        ],
+        "pageInfo": { "hasNextPage": true, "endCursor": "cursor-1" }
+      }
+    }
+  }
+}

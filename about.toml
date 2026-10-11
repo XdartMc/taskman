@@ -1,0 +1,21 @@
+# cargo-about's settings for LICENSE-THIRD-PARTY, the notices of the crates built into taskman:
+#   cargo about generate --locked --fail about.hbs -o LICENSE-THIRD-PARTY
+# CI checks the file is current, and the release workflow builds it again for the archives.
+
+# The licenses taskman accepts, as in deny.toml. In order of preference: a crate offering
+# "MIT OR Apache-2.0" is listed under MIT.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+# The platforms taskman is released for, as in deny.toml.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"]
+# Only code that ends up in the binary: build scripts and tests don't ship with it.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true

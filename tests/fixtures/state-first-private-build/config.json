@@ -1,0 +1,18 @@
+{
+  "accounts": [
+    {
+      "id": "jira-1",
+      "provider": "jira",
+      "site": "https://example.atlassian.net",
+      "email": "you@example.com",
+      "token": "env:JIRA_API_TOKEN"
+    },
+    {
+      "id": "linear-1",
+      "provider": "linear",
+      "site": "acme",
+      "email": "",
+      "token": "cmd:pass show linear"
+    }
+  ]
+}

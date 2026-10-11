@@ -1,0 +1,15 @@
+{
+  "data": {
+    "viewer": { "login": "Ana-Example" },
+    "repository": {
+      "issues": {
+        "nodes": [
+          { "number": 15, "title": "Fix the login form", "assignees": { "nodes": [] } },
+          { "number": 9, "title": "Crash on start", "assignees": { "nodes": [{ "login": "ana-example" }] } },
+          { "number": 3, "title": "Docs: explain setup", "assignees": { "nodes": [{ "login": "ben-example" }] } },
+          { "number": 14, "title": "Slow search", "assignees": { "nodes": [{ "login": "ben-example" }, { "login": "ana-example" }] } }
+        ]
+      }
+    }
+  }
+}

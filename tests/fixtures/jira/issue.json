@@ -1,0 +1,46 @@
+{
+  "id": "10052",
+  "key": "ENG-52",
+  "self": "https://example.atlassian.net/rest/api/3/issue/10052",
+  "fields": {
+    "summary": "Fix the login page",
+    "status": { "name": "In Progress", "statusCategory": { "id": 4, "key": "indeterminate", "name": "In Progress" } },
+    "issuetype": { "name": "Task", "subtask": false },
+    "priority": { "name": "Medium", "id": "3" },
+    "assignee": { "accountId": "000000:0000-ana", "displayName": "Ana Example", "active": true },
+    "description": {
+      "type": "doc",
+      "version": 1,
+      "content": [
+        { "type": "paragraph", "content": [{ "type": "text", "text": "The login page loops after SSO." }] },
+        {
+          "type": "bulletList",
+          "content": [
+            { "type": "listItem", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Sign in with SSO" }] }] },
+            { "type": "listItem", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "See it redirect again" }] }] }
+          ]
+        },
+        { "type": "codeBlock", "attrs": { "language": "text" }, "content": [{ "type": "text", "text": "GET /login 302" }] }
+      ]
+    },
+    "comment": {
+      "startAt": 0,
+      "maxResults": 2,
+      "total": 2,
+      "comments": [
+        {
+          "id": "20001",
+          "author": { "displayName": "Ana Example" },
+          "created": "2024-03-01T09:00:00.000+0000",
+          "body": { "type": "doc", "version": 1, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Seen on staging." }] }] }
+        },
+        {
+          "id": "20002",
+          "author": { "displayName": "Ben Example" },
+          "created": "2024-03-02T10:30:00.000+0000",
+          "body": { "type": "doc", "version": 1, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "Fixed by clearing the cookie." }] }] }
+        }
+      ]
+    }
+  }
+}

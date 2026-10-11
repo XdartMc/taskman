@@ -1,0 +1,42 @@
+# cargo-deny settings, checked in CI: cargo deny check advisories bans licenses sources
+
+[graph]
+# The platforms taskman is released for; Windows-only dependencies don't count.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"]
+
+[advisories]
+# Fail on vulnerabilities in any crate, but on unmaintained ones only among our direct
+# dependencies: a transitive one is for its parent crate to replace.
+unmaintained = "workspace"
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# vt100 with OSC 8 links kept per cell, while upstream has no release with it.
+allow-git = ["https://github.com/sanagnos/vt100-rust"]
+
+[bans]
+wildcards = "deny"
+# Two versions of a crate is a bigger build, not a fault: warn, and skip the ones a dependency
+# brings in until it moves on, so a new one stands out. A skip that no longer matches is warned
+# about too; remove it then.
+multiple-versions = "warn"
+skip = [
+    { crate = "hashbrown@0.16", reason = "kasuari, under ratatui-core, is a version behind" },
+    { crate = "signal-hook@0.3", reason = "crossterm 0.29 uses it; taskman uses 0.4" },
+    { crate = "syn@2", reason = "proc macros under crossterm, ratatui and filedescriptor" },
+    { crate = "thiserror@1", reason = "filedescriptor 0.8, under portable-pty" },
+    { crate = "thiserror-impl@1", reason = "filedescriptor 0.8, under portable-pty" },
+]

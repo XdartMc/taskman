@@ -1,0 +1,15 @@
+{
+  "data": {
+    "repository": {
+      "issue": {
+        "closedByPullRequestsReferences": {
+          "nodes": [
+            { "number": 40, "state": "CLOSED", "updatedAt": "2026-09-20T10:00:00Z", "repository": { "nameWithOwner": "acme/web" } },
+            { "number": 45, "state": "OPEN", "updatedAt": "2026-10-01T10:00:00Z", "repository": { "nameWithOwner": "acme/web" } },
+            { "number": 7, "state": "OPEN", "updatedAt": "2026-10-02T10:00:00Z", "repository": { "nameWithOwner": "acme/api" } }
+          ]
+        }
+      }
+    }
+  }
+}
