@@ -4,6 +4,8 @@ What changed in each release; a release's notes on GitHub are its section here. 
 
 ## Unreleased
 
+## 0.1.1 - 2026-10-12
+
 - Arrow keys now leave a form's list: in the Add form's open issues (and the project form's projects or teams), ↑ on the first entry goes back to what's typed and on up through the fields, instead of stopping there. The Add form's Ticket field and its list now come last, below CLI, Worktree and Base, so a long list never stands between you and the other fields; the form still opens on Ticket.
 - Adding a project with Jira or Linear is one form that signs in first: enter the site or workspace, then a new account's email and token right there (no second form, no repeated provider or site), and taskman lists the Jira projects or Linear teams the account can see to pick the ticket prefix from. A saved account that fits is picked for you; a key can still be typed when the list can't load. A project's settings work the same way. GitHub Issues and Local files suggest a prefix, a board's from the ticket files it has.
 - The account form can save a Jira or Linear token to your keychain in one step: on macOS and on Linux with a desktop keyring, paste it into the form and taskman keeps it in the macOS Keychain or Secret Service, saving only `keychain:jira-1`. Deleting the account offers to delete the token there too.
