@@ -2,12 +2,13 @@
 //! submitting it, with a background check first where one is needed (a connection test, say). The
 //! forms themselves are in `add_form.rs`, `settings.rs`, `projects.rs` and `accounts.rs`.
 
-use super::accounts::{AfterAccount, account_defaults, account_rows};
-use super::projects::{expand_tilde, show_project_rows, tracker_from_form, worktree_hints};
+use super::accounts::{account_defaults, account_rows, form_provider};
+use super::projects::Choices;
 use super::settings::prefix_hint;
 use super::sync::Msg;
 use super::{App, Mode};
-use crate::{github, keys, local, store};
+use crate::keys;
+use crate::store::Provider;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::sync::mpsc;
 
@@ -58,15 +59,23 @@ impl List {
         self.at.and_then(|a| a.checked_sub(self.top))
     }
 
-    /// Moves the highlight; the first press of ↓ highlights the first issue, of ↑ the last.
-    fn step(&mut self, down: bool) {
+    /// Moves the highlight as a search box's dropdown does: ↓ from what's typed goes into the
+    /// list, ↑ from its first entry back to what's typed. False when the key goes past it instead
+    /// (↑ with nothing highlighted, ↓ on the last entry), and focus leaves the field; the highlight
+    /// is dropped then, so leaving picks nothing.
+    fn step(&mut self, down: bool) -> bool {
         let last = self.picks.saturating_sub(1);
-        self.at = Some(match (self.at, down) {
-            (None, true) => 0,
-            (None, false) => last,
-            (Some(a), true) => (a + 1).min(last),
-            (Some(a), false) => a.saturating_sub(1),
-        });
+        self.at = match (self.at, down) {
+            (None, true) => Some(0),
+            (Some(a), true) if a < last => Some(a + 1),
+            (Some(a), false) if a > 0 => Some(a - 1),
+            (Some(0), false) => None,
+            (None, false) | (Some(_), _) => {
+                self.at = None;
+                return false;
+            }
+        };
+        true
     }
 
     /// Scrolls the window of `shown` issues to keep the highlight in it.
@@ -153,10 +162,8 @@ pub enum FormKind {
     Project,
     /// Settings of the project at this index.
     ProjectSettings(usize),
-    /// Adding an account; `then` is the project waiting on it.
-    Account {
-        then: Option<AfterAccount>,
-    },
+    /// Adding an account on its own; a project form adds one inline.
+    Account,
     /// Editing the account at this index.
     AccountSettings(usize),
     /// Renaming the agent at this ticket index.
@@ -183,6 +190,11 @@ pub struct Form {
     /// The source of a token this form put in the keychain and cleared from its Token field, so
     /// the form can save without it being pasted again.
     pub(super) stored: Option<String>,
+    /// A project form's list of what its account can see, to pick the ticket prefix from.
+    pub(super) choices: Option<Box<Choices>>,
+    /// The ticket prefix a project form filled in itself, which it may change again until the user
+    /// types another.
+    pub(super) suggested: Option<String>,
 }
 
 impl Form {
@@ -198,6 +210,8 @@ impl Form {
             checking: None,
             checked: None,
             stored: None,
+            choices: None,
+            suggested: None,
         }
     }
 
@@ -259,6 +273,9 @@ pub(super) enum Check {
     Project(Result<bool, String>),
     /// Who an account's token belongs to, and for Linear its workspace; or why that failed.
     Account(Result<(String, String), String>),
+    /// A new account's check for a project form, with a Jira prefix typed by hand: who the token
+    /// belongs to, and whether that project exists.
+    Signed(Result<(String, String), String>, Result<bool, String>),
     /// A token was put in the keychain, and not tested (a Jira account with no site); or why it
     /// couldn't be, which no "save anyway" gets past.
     Stored(Result<(), String>),
@@ -291,10 +308,25 @@ impl App {
             }
             // Enter again while the check runs would start a second one.
             KeyCode::Enter if form.checking.is_some() => return,
-            // ↑/↓ pick from the focused field's list, if it has one; otherwise they move between
-            // fields.
+            // ↑/↓ pick from the focused field's list, if it has one, and past its ends move between
+            // fields, as they do otherwise, but never round from the last to the first. Tab
+            // always moves.
             KeyCode::Down | KeyCode::Up if form.fields[form.focus].list.picks > 0 => {
-                form.fields[form.focus].list.step(key.code == KeyCode::Down);
+                let down = key.code == KeyCode::Down;
+                let step = if down { 1 } else { -1 };
+                let next = form.next_focus(step);
+                // Past the list's ends to the field beside it, unless that would wrap round the
+                // form: ↓ at the bottom of the last field's list stays on its last entry.
+                let wraps = if down { next <= form.focus } else { next >= form.focus };
+                let list = &mut form.fields[form.focus].list;
+                let at = list.at;
+                if !list.step(down) {
+                    if wraps {
+                        list.at = at;
+                    } else {
+                        form.focus = next;
+                    }
+                }
             }
             KeyCode::Tab | KeyCode::Down => form.focus = form.next_focus(1),
             KeyCode::BackTab | KeyCode::Up => form.focus = form.next_focus(-1),
@@ -327,72 +359,35 @@ impl App {
         }
         if matches!(label, "Provider" | "Site" | "Keep in") {
             match form.kind {
-                FormKind::Account { .. } => {
-                    account_defaults(form, &self.config, self.keychain.as_ref());
+                FormKind::Account => {
+                    let (provider, site) = (form_provider(form), form.value("Site"));
+                    account_defaults(form, provider, &site, &self.config, self.keychain.as_ref());
                 }
                 FormKind::AccountSettings(i) => {
-                    account_rows(form, self.config.accounts.get(i), self.keychain.as_ref());
+                    let account = self.config.accounts.get(i);
+                    let provider = account.map_or(Provider::Jira, |a| a.provider);
+                    account_rows(form, provider, account, self.keychain.as_ref());
                 }
                 _ => {}
             }
         }
         let project_form = matches!(form.kind, FormKind::Project | FormKind::ProjectSettings(_));
         let ticket_form = matches!(form.kind, FormKind::Ticket);
-        if (ticket_form
-            && matches!(
-                label,
-                "Project" | "Type" | "CLI" | "Ticket" | "Name" | "Worktree" | "Base"
-            ))
-            || (project_form
-                && matches!(
-                    label,
-                    "Path" | "Tracker" | "Site" | "Ticket prefix" | "Branch" | "Folder"
-                ))
+        if ticket_form
+            && matches!(label, "Project" | "Type" | "CLI" | "Ticket" | "Name" | "Worktree" | "Base")
         {
             let mut f = std::mem::replace(form, Box::new(Form::new(FormKind::Ticket, "", vec![])));
-            if ticket_form {
-                if label == "Project"
-                    && let Some(p) = self.projects.iter().position(|p| p.name == f.value("Project"))
-                {
-                    self.list_open_issues(p);
-                }
-                self.update_ticket_hint(&mut f);
-                self.update_worktree_field(&mut f, label == "Project");
-            } else {
-                if matches!(label, "Path" | "Tracker" | "Site") {
-                    self.refresh_accounts(&mut f, None);
-                }
-                let provider = tracker_from_form(&f).map(|t| t.provider);
-                if label == "Tracker"
-                    && provider.is_some_and(|p| p.has_board() || p.site_from_remote())
-                    && f.value("Ticket prefix").is_empty()
-                {
-                    let (repo, name) = match f.kind {
-                        FormKind::ProjectSettings(p) => {
-                            (self.projects[p].repo.clone(), self.projects[p].name.clone())
-                        }
-                        _ => {
-                            let repo = expand_tilde(&f.value("Path"));
-                            let name = store::project_name(&repo);
-                            (repo, name)
-                        }
-                    };
-                    // GitHub Issues: the repository's name, as its issues' keys read best.
-                    let name = provider
-                        .filter(|p| p.site_from_remote())
-                        .and_then(|_| github::default_repo(&repo))
-                        .and_then(|r| r.name.rsplit('/').next().map(String::from))
-                        .unwrap_or(name);
-                    f.set("Ticket prefix", local::default_prefix(&name));
-                }
-                if let FormKind::ProjectSettings(p) = f.kind {
-                    let repo = &self.projects[p].repo;
-                    show_project_rows(&mut f, self.gh(repo) != github::Gh::NotGit);
-                    worktree_hints(&mut f, repo);
-                } else {
-                    show_project_rows(&mut f, false);
-                }
+            if label == "Project"
+                && let Some(p) = self.projects.iter().position(|p| p.name == f.value("Project"))
+            {
+                self.list_open_issues(p);
             }
+            self.update_ticket_hint(&mut f);
+            self.update_worktree_field(&mut f, label == "Project");
+            self.put_form(f);
+        } else if project_form {
+            let mut f = std::mem::replace(form, Box::new(Form::new(FormKind::Ticket, "", vec![])));
+            self.project_form_changed(&mut f, label, before);
             self.put_form(f);
         }
     }
@@ -422,7 +417,7 @@ impl App {
                 let p = *p;
                 self.submit_project(&mut form, Some(p))
             }
-            FormKind::Account { .. } => self.submit_account(&mut form, None),
+            FormKind::Account => self.submit_account(&mut form, None),
             FormKind::AccountSettings(i) => {
                 let i = *i;
                 self.submit_account(&mut form, Some(i))
