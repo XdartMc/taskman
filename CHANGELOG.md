@@ -4,6 +4,8 @@ What changed in each release; a release's notes on GitHub are its section here. 
 
 ## Unreleased
 
+## 0.1.3 - 2026-10-14
+
 - Updated rustls, the TLS library taskman uses for HTTPS, to 0.23.46 for its security advisories (RUSTSEC-2026-0346 to 0349).
 
 ## 0.1.2 - 2026-10-12
