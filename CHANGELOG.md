@@ -4,6 +4,8 @@ What changed in each release; a release's notes on GitHub are its section here. 
 
 ## Unreleased
 
+## 0.1.5 - 2026-10-15
+
 - A session that won't resume because Claude Code runs its conversation as a background session (`claude --bg`) now keeps Claude's message on screen instead of flashing it, and Enter stops that copy with `claude stop` and resumes it in the pane. If the stop fails, the pane says so and gives the command to run yourself.
 
 ## 0.1.4 - 2026-10-15
