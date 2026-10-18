@@ -4,6 +4,8 @@ What changed in each release; a release's notes on GitHub are its section here. 
 
 ## Unreleased
 
+## 0.1.8 - 2026-10-18
+
 - The faint line between a project's agents and its tickets in the sidebar is gone: agents and tickets are spaced like any other cards again.
 
 ## 0.1.7 - 2026-10-18
