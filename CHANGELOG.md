@@ -4,6 +4,8 @@ What changed in each release; a release's notes on GitHub are its section here. 
 
 ## Unreleased
 
+## 0.1.9 - 2026-10-18
+
 - Running an older taskman no longer drops settings and state a newer one saved, such as `"sleep_after": null` (never sleep): fields it doesn't know in `tickets.json` and `config.json` are kept when it saves. Both files now carry a `"format"` number, and a taskman refuses a file of a newer format, leaving it as it is, instead of misreading it. Older releases still drop fields they don't know.
 - A key typed after the terminal is resized now arrives at once. It used to wait for the next key (the Enter that sends a prompt, the `y` that answers a permission prompt), with taskman using most of a processor core meanwhile.
 - In a project with a tracker, a project agent now hands work that changes code or files to a ticket session: it creates a ticket, adds it with `taskman add` and briefs its session, unless you ask it to make the change itself or its role says it may. It creates the ticket with `taskman add --new`, which now works on every tracker.
