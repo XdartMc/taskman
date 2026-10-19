@@ -127,8 +127,8 @@ impl Session {
         let mut reader = pair.master.try_clone_reader()?;
         let input = Input::spawn(pair.master.take_writer()?)?;
         let parser = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
-            rows,
-            cols,
+            crate::term::dim(rows),
+            crate::term::dim(cols),
             scrollback,
             Callbacks { colours, ..Callbacks::default() },
         )));
@@ -222,8 +222,12 @@ impl Session {
             return;
         }
         self.size = (rows, cols);
+        // The screen first: the CLI redraws for its new size as soon as the pty has it, and
+        // that output must land on a screen of that size. vt100 0.18 moves rows between the screen
+        // and its history on a resize, so the redraw of a CLI that got there first would be
+        // taken as drawn on the old screen, and rows of its history overwritten.
+        lock(&self.parser).screen_mut().set_size(crate::term::dim(rows), crate::term::dim(cols));
         let _ = self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-        lock(&self.parser).screen_mut().set_size(rows, cols);
     }
 
     /// How long since the child last wrote anything.
@@ -279,7 +283,7 @@ impl Session {
         p.screen_mut().set_scrollback(0);
         let (rows, cols) = p.screen().size();
         let mut copy = vt100::Parser::new_with_callbacks(rows, cols, 0, Callbacks::default());
-        copy.process(&p.screen().contents_formatted());
+        copy.process(p.screen().contents_formatted().as_bytes());
         p.screen_mut().set_scrollback(back);
         copy
     }
@@ -666,8 +670,8 @@ pub mod fake {
                 .expect("a thread for the fake's writer");
             let sent = Sent { bytes, queued: input.queued.clone() };
             let parser = vt100::Parser::new_with_callbacks(
-                rows,
-                cols,
+                crate::term::dim(rows),
+                crate::term::dim(cols),
                 crate::store::SCROLLBACK,
                 Callbacks::default(),
             );
@@ -813,8 +817,8 @@ mod tests {
 
     fn parser(rows: u16, cols: u16) -> Parser {
         vt100::Parser::new_with_callbacks(
-            rows,
-            cols,
+            crate::term::dim(rows),
+            crate::term::dim(cols),
             crate::store::SCROLLBACK,
             Callbacks::default(),
         )
@@ -827,7 +831,7 @@ mod tests {
         for then in [&b"\r\x1b[73C\x1b[K"[..], b"\r\x1b[K", b"\x1b[1K", b"\x1b[J", b"\r\x1b[73Cx"] {
             let mut p = parser(38, 75);
             p.process(format!("{}漢", "a".repeat(73)).as_bytes());
-            p.screen_mut().set_size(38, 74);
+            p.screen_mut().set_size(crate::term::dim(38), crate::term::dim(74));
             p.process(then);
             assert!(!p.screen().contents().contains('漢'), "{then:?}");
         }
@@ -870,7 +874,9 @@ mod tests {
                 for step in steps {
                     match step {
                         Ok(bytes) => p.process(&bytes),
-                        Err((rows, cols)) => p.screen_mut().set_size(rows, cols),
+                        Err((rows, cols)) => {
+                            p.screen_mut().set_size(crate::term::dim(rows), crate::term::dim(cols));
+                        }
                     }
                 }
             }
