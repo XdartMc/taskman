@@ -80,7 +80,10 @@ fn a_new_jira_project_signs_in_then_lists_the_projects_to_pick_from() {
 fn a_saved_account_that_fits_is_picked_and_lists_at_once() {
     let mut app = acme_app();
     new_project(&mut app, "Linear");
-    assert_eq!(shown(&app), ["Path", "Tracker", "Workspace", "Account", "Read from", "Team"]);
+    assert_eq!(
+        shown(&app),
+        ["Path", "Tracker", "Workspace", "Account", "Keep in", "Token", "Team"]
+    );
     fill(&mut app, "Workspace", "acme");
     // acme's key is for this workspace: picked, and its fields go.
     assert_eq!(field(&app, "Account"), "acme · env:ACME_LINEAR_TOKEN");
@@ -98,6 +101,26 @@ fn a_saved_account_that_fits_is_picked_and_lists_at_once() {
     assert_eq!(app.config.accounts.len(), 1);
 }
 
+/// A new account in a project form waits for the keychain check too, then offers what it found.
+#[test]
+fn a_new_account_in_a_project_form_waits_for_the_keychain_check() {
+    let mut app = offline(Saved::default());
+    app.keychain_probed = false;
+    new_project(&mut app, "Jira");
+    assert_eq!(
+        shown(&app),
+        ["Path", "Tracker", "Site", "Account", "Email", "Read from", "Project"]
+    );
+    app.tx.send(Msg::Keychain(None)).unwrap();
+    app.drain_messages();
+    assert_eq!(
+        shown(&app),
+        ["Path", "Tracker", "Site", "Account", "Email", "Keep in", "Token", "Project"]
+    );
+    assert_eq!(field(&app, "Keep in"), "File");
+    assert!(hint_of(&app, "Account").starts_with("taskman never saves your token in config.json"));
+}
+
 #[test]
 fn a_saved_account_picked_brings_its_workspace() {
     let mut app = acme_app();
@@ -113,6 +136,7 @@ fn a_list_that_fails_says_why_and_takes_a_key_typed() {
     new_project(&mut app, "Jira");
     fill(&mut app, "Site", "example.atlassian.net");
     fill(&mut app, "Email", "dana@example.com");
+    choose(&mut app, "Keep in", "Variable or command");
     fill(&mut app, "Read from", "env:TASKMAN_TEST_UNSET_TOKEN");
     app.on_key(key(KeyCode::Tab));
     answer_choices(&mut app, Err("Jira request failed: network unreachable"));
@@ -136,6 +160,7 @@ fn a_connection_that_fails_saves_on_a_second_enter() {
     new_project(&mut app, "Jira");
     fill(&mut app, "Site", "example.atlassian.net");
     fill(&mut app, "Email", "dana@example.com");
+    choose(&mut app, "Keep in", "Variable or command");
     fill(&mut app, "Read from", "env:TASKMAN_TEST_UNSET_TOKEN");
     fill(&mut app, "Project", "ENG");
     app.on_key(key(KeyCode::Enter));
@@ -143,7 +168,7 @@ fn a_connection_that_fails_saves_on_a_second_enter() {
     assert_eq!(
         form_error(&app).as_deref(),
         Some(
-            "Jira rejected the credentials (check the email and API token). Fix it, or press Enter again to save anyway."
+            "Jira rejected the credentials (check the email and API token). Or pick File under Keep in and paste the token there. Fix it, or press Enter again to save anyway."
         )
     );
     assert!(config_file().is_empty(), "saved before the second Enter");
@@ -207,7 +232,15 @@ fn a_new_linear_account_is_the_workspaces_and_lists_its_teams() {
     fill(&mut app, "Workspace", "globex");
     assert_eq!(field(&app, "Account"), "+ new account");
     // No email for Linear, and a key of its own for a second workspace.
-    assert_eq!(shown(&app), ["Path", "Tracker", "Workspace", "Account", "Read from", "Team"]);
+    assert_eq!(
+        shown(&app),
+        ["Path", "Tracker", "Workspace", "Account", "Keep in", "Token", "Team"]
+    );
+    choose(&mut app, "Keep in", "Variable or command");
+    assert_eq!(
+        shown(&app),
+        ["Path", "Tracker", "Workspace", "Account", "Keep in", "Read from", "Team"]
+    );
     assert!(hint_of(&app, "Read from").starts_with("env:LINEAR_API_KEY reads"));
     fill(&mut app, "Read from", "env:TASKMAN_TEST_UNSET_KEY");
     app.on_key(key(KeyCode::Tab));
@@ -220,7 +253,7 @@ fn a_new_linear_account_is_the_workspaces_and_lists_its_teams() {
     assert_eq!(
         form_error(&app).as_deref(),
         Some(
-            "This key belongs to the workspace initech, not globex. Fix it, or press Enter again to save anyway."
+            "This key belongs to the workspace initech, not globex. Or pick File under Keep in and paste the token there. Fix it, or press Enter again to save anyway."
         )
     );
     // Another key: the list was for the old one, so it goes, and the team typed stays.
