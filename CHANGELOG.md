@@ -4,6 +4,8 @@ What changed in each release; a release's notes on GitHub are its section here. 
 
 ## Unreleased
 
+## 0.1.14 - 2026-10-19
+
 - Help (`ctrl+a ?`) wraps its lines instead of cutting them at 80 columns, so each key's description is whole (`ctrl+a {` / `}` ends with Enter), and lists the sidebar's badges in columns that no longer run together. It scrolls by its wrapped rows. The legend adds `✦`, which marks an agent; a card added by `taskman add` is now marked `+ new` rather than `✦ new`.
 - The footer counts sessions waiting on you with `▲` when one of them asks you something, and leaves the count out rather than run it into the keys on a narrow window.
 - Deleting a project counts its tickets and agents apart (`Its 4 tickets and 2 agents close too`), and the quit dialog says when quitting waits for a closed ticket's worktree to be removed.
