@@ -4,6 +4,8 @@ What changed in each release; a release's notes on GitHub are its section here. 
 
 ## Unreleased
 
+## 0.1.15 - 2026-10-19
+
 - Scrolling a session back over some emoji, such as ⚠️ (the warning sign with its emoji selector), no longer leaves stale characters on screen and pushes the pane's right edge a column out on those rows. taskman counted that emoji as one column where terminals such as Windows Terminal draw two, so everything after it on the row was drawn a column off and some of it was never redrawn.
 
 ## 0.1.14 - 2026-10-19
