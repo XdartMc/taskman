@@ -2,6 +2,11 @@
 
 What changed in each release; a release's notes on GitHub are its section here. What's merged but not released yet is in [changelog.d/](changelog.d/), a file for each change, which the release moves in here. Versions follow Cargo's rule for 0.x: the patch number (0.1.1) for anything compatible, fixes and new features alike, and the minor (0.2.0) for breaking changes, such as changed keys, config or saved-state format, or a removed command.
 
+## 0.1.20 - 2026-10-20
+
+- For contributors: a pull request now notes its change in a file of its own under `changelog.d/` instead of a line under "Unreleased" in CHANGELOG.md, so pull requests no longer conflict there. `scripts/release.sh` moves the files into the version's section, in the order they were merged.
+- The agents' board shows a ticket's latest review as the PR panel does: a dismissed review as dismissed rather than as a comment, and a comment with 💬. A PR or review state GitHub adds later shows by its own name rather than passing for open or for a comment.
+
 ## 0.1.19 - 2026-10-20
 
 - In a session taskman started, `taskman status`, `taskman add` and `taskman move`, which sessions run without asking, now keep to the session's own project: another project's ticket, by its prefix or `--project`, is refused, so text a session read in one project can't have it read another project's tracker, or open sessions there, unasked. The error says how to go ahead: the same command with `env -u TASKMAN_REPO` in front, which Claude asks you about first. From your own shell, any project works as before.
