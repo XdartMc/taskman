@@ -1,1 +1,0 @@
-- The sidebar no longer numbers its first nine cards, and `ctrl+a 1-9` no longer switches to them: the names get the room instead. Switch with `ctrl+a /` (jump to a card by name or key), `ctrl+a [` / `]` or a click.

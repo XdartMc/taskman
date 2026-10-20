@@ -2,6 +2,12 @@
 
 What changed in each release; a release's notes on GitHub are its section here. What's merged but not released yet is in [changelog.d/](changelog.d/), a file for each change, which the release moves in here. Versions follow Cargo's rule for 0.x: the patch number (0.1.1) for anything compatible, fixes and new features alike, and the minor (0.2.0) for breaking changes, such as changed keys, config or saved-state format, or a removed command.
 
+## 0.1.24 - 2026-10-20
+
+- The sidebar no longer numbers its first nine cards, and `ctrl+a 1-9` no longer switches to them: the names get the room instead. Switch with `ctrl+a /` (jump to a card by name or key), `ctrl+a [` / `]` or a click.
+- A Codex session whose automatic reviewer ("Approve for me" in `/permissions`) is deciding an approval now shows as working, with no bell or notification; only a prompt Codex puts to you shows "needs you", up to a second after Codex reports it.
+- Updated rustls-webpki and webpki-roots for two certificate advisories (RUSTSEC-2026-0381, RUSTSEC-2026-0382), which could let a distrusted intermediate certificate be accepted on taskman's own connections to Jira, Linear and GitHub releases.
+
 ## 0.1.23 - 2026-10-20
 
 - `taskman uninstall` removes taskman in one step: the program, and when you say so (`--purge`, or yes to its second question) your projects, accounts, saved state and the tokens taskman saved in your keychain or its token folder. It lists everything first, refuses while taskman runs, and leaves your repositories, worktrees and branches alone, listing the worktrees taskman made with the command to remove each.
