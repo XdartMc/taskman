@@ -2,6 +2,12 @@
 
 What changed in each release; a release's notes on GitHub are its section here. What's merged but not released yet is in [changelog.d/](changelog.d/), a file for each change, which the release moves in here. Versions follow Cargo's rule for 0.x: the patch number (0.1.1) for anything compatible, fixes and new features alike, and the minor (0.2.0) for breaking changes, such as changed keys, config or saved-state format, or a removed command.
 
+## 0.1.22 - 2026-10-20
+
+- A git, gh or token command that runs past its time limit now stops with everything it started (ssh, a credential helper) also where there's no `kill` program, as in slim container images. Before, what it started could keep running, and keep writing into a worktree taskman had already reported as failed.
+- Scrolled back to the oldest row a session's pane still holds, once older rows have dropped off its history, the pane says which key opens the CLI's full transcript: `ctrl+o` in Claude Code, `ctrl+t` in Codex.
+- taskman draws only when the screen changes: other sessions' output no longer redraws it, and an idle taskman draws once a second instead of ten times. With nine busy sessions in the background it takes about a third of the processor time it did.
+
 ## 0.1.21 - 2026-10-20
 
 - Every dialog, form and settings page shows its keys the same way, each key in bold, and a row of keys too long for the screen breaks between keys instead of in the middle of one. The notices list on a small screen no longer cuts its keys off.
