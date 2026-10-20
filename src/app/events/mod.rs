@@ -142,18 +142,27 @@ fn sh(dir: &std::path::Path, cmd: &str) {
     assert!(ok, "{cmd}");
 }
 
-/// Adds ticket ENG-5 to project web, a git repository of this test's with no tracker, and waits
-/// for git to fail at making its worktree: a folder is in the way. Returns the ticket and the
-/// folder; removed, the next try succeeds.
-fn failed_worktree(app: &mut App) -> (usize, std::path::PathBuf) {
-    let repo = store::state_dir().join("web");
-    std::fs::create_dir_all(&repo).unwrap();
+/// Adds project web, a git repository of this test's with no tracker, so its tickets' branches
+/// are their keys. Returns the project and its main checkout, reached through a symlink, as
+/// macOS's temporary folder is: git lists worktrees by their real paths.
+fn web_project(app: &mut App) -> (usize, std::path::PathBuf) {
+    let real = store::state_dir().join("real");
+    std::fs::create_dir_all(real.join("web")).unwrap();
+    std::os::unix::fs::symlink(&real, store::state_dir().join("linked")).unwrap();
+    let repo = store::state_dir().join("linked/web");
     sh(&repo, "git init -q -b main && git commit -q --allow-empty -m init");
     let web = serde_json::json!({ "name": "web", "repo": repo });
     app.projects.push(serde_json::from_value(web).unwrap());
+    (app.projects.len() - 1, repo)
+}
+
+/// Adds ticket ENG-5 to project web (`web_project`), and waits for git to fail at making its
+/// worktree: a folder is in the way. Returns the ticket and the folder; removed, the next try
+/// succeeds.
+fn failed_worktree(app: &mut App) -> (usize, std::path::PathBuf) {
+    let (p, repo) = web_project(app);
     let in_the_way = crate::worktree::folder_path(crate::worktree::BESIDE, &repo, "ENG-5");
     std::fs::create_dir_all(&in_the_way).unwrap();
-    let p = app.projects.len() - 1;
     let added = app.add_ticket(p, "ENG-5".into(), store::Cli::Claude, true, None, true);
     assert!(matches!(added, Ok(crate::app::ticket::Added::New(_))));
     settle(app);
