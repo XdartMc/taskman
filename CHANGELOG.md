@@ -2,6 +2,11 @@
 
 What changed in each release; a release's notes on GitHub are its section here. What's merged but not released yet is in [changelog.d/](changelog.d/), a file for each change, which the release moves in here. Versions follow Cargo's rule for 0.x: the patch number (0.1.1) for anything compatible, fixes and new features alike, and the minor (0.2.0) for breaking changes, such as changed keys, config or saved-state format, or a removed command.
 
+## 0.1.21 - 2026-10-20
+
+- Every dialog, form and settings page shows its keys the same way, each key in bold, and a row of keys too long for the screen breaks between keys instead of in the middle of one. The notices list on a small screen no longer cuts its keys off.
+- Titles and names in Chinese, Japanese or Korean, or with emoji such as ⚠️, are cut to the columns they take on screen: they end with `…` at the edge of the sidebar, panels and forms instead of being clipped, the counts and providers in Settings stay in view, and `taskman status` keeps its columns in line.
+
 ## 0.1.20 - 2026-10-20
 
 - For contributors: a pull request now notes its change in a file of its own under `changelog.d/` instead of a line under "Unreleased" in CHANGELOG.md, so pull requests no longer conflict there. `scripts/release.sh` moves the files into the version's section, in the order they were merged.
