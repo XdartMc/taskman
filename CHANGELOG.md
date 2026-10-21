@@ -2,6 +2,11 @@
 
 What changed in each release; a release's notes on GitHub are its section here. What's merged but not released yet is in [changelog.d/](changelog.d/), a file for each change, which the release moves in here. Versions follow Cargo's rule for 0.x: the patch number (0.1.1) for anything compatible, fixes and new features alike, and the minor (0.2.0) for breaking changes, such as changed keys, config or saved-state format, or a removed command.
 
+## 0.1.26 - 2026-10-21
+
+- Settings → Help & feedback: each link's hint now lines up with the link above it, and the security link's label is just Security.
+- Text fields in forms have a cursor: ←/→ move it, Home and End go to the ends, ctrl+←/→ (or alt+←/→) move a word, Delete deletes after it and ctrl+w the word before it, and typing and pasting go in where it is. Branch's presets are listed under it while it's focused, to pick with ↑/↓ and Enter, rather than cycled with ←/→.
+
 ## 0.1.25 - 2026-10-21
 
 - Settings has a Help & feedback page: it opens the guide, the bug and feature forms, and a private security report on GitHub. The bug form comes filled in with the taskman, Claude Code or Codex versions, the OS and the terminal. Over SSH, or with no browser, it copies the link instead.
