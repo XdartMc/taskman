@@ -99,7 +99,7 @@ With one or two sessions and no tracker, tmux or a few terminal tabs running `cl
 
 Each session is the real CLI, so a new Claude Code or Codex version works in taskman as it does in a terminal. If a CLI changes the hooks, output or options taskman relies on (last checked with Claude Code 2.1.296 and Codex 0.162), the sidebar's state can lag or be wrong and resuming or messaging can fail; the [guide](docs/guide.md#when-claude-code-or-codex-changes) has the details.
 
-If you see that after a CLI update, [open an issue](https://github.com/sanagnos/taskman/issues/new/choose) with `taskman --version` and `claude --version` or `codex --version`.
+If you see that after a CLI update, [open an issue](https://github.com/sanagnos/taskman/issues/new/choose) with `taskman --version` and `claude --version` or `codex --version`, or use **Report a bug** in Settings → Help & feedback, which fills them in.
 
 ## Learn more
 
