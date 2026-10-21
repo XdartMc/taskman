@@ -2,6 +2,10 @@
 
 What changed in each release; a release's notes on GitHub are its section here. What's merged but not released yet is in [changelog.d/](changelog.d/), a file for each change, which the release moves in here. Versions follow Cargo's rule for 0.x: the patch number (0.1.1) for anything compatible, fixes and new features alike, and the minor (0.2.0) for breaking changes, such as changed keys, config or saved-state format, or a removed command.
 
+## 0.1.25 - 2026-10-21
+
+- Settings has a Help & feedback page: it opens the guide, the bug and feature forms, and a private security report on GitHub. The bug form comes filled in with the taskman, Claude Code or Codex versions, the OS and the terminal. Over SSH, or with no browser, it copies the link instead.
+
 ## 0.1.24 - 2026-10-20
 
 - The sidebar no longer numbers its first nine cards, and `ctrl+a 1-9` no longer switches to them: the names get the room instead. Switch with `ctrl+a /` (jump to a card by name or key), `ctrl+a [` / `]` or a click.
