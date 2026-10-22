@@ -2,6 +2,18 @@
 
 What changed in each release; a release's notes on GitHub are its section here. What's merged but not released yet is in [changelog.d/](changelog.d/), a file for each change, which the release moves in here. Versions follow Cargo's rule for 0.x: the patch number (0.1.1) for anything compatible, fixes and new features alike, and the minor (0.2.0) for breaking changes, such as changed keys, config or saved-state format, or a removed command.
 
+## 0.1.27 - 2026-10-22
+
+- The dialog that approves an agent from `taskman add --agent` keeps its keys on screen on small terminals: a long role scrolls with ↑/↓ and says how many lines are hidden. Every line of the role has a `│` bar in front, so none can pass for taskman's own text, and approving after the command stopped waiting no longer says it was added "while taskman was closed".
+- `taskman add --new` run by a session no longer creates the ticket by itself: taskman shows you the title and description and creates the ticket only when you approve, so text a session read can't have it publish a secret as an issue. The command waits up to a minute and prints the new key, or says you declined. From your own shell, `--new` creates the ticket at once as before.
+- In a short window, such as 80x24, the Settings and Add forms scroll to keep the field you're on in view, and their error and keys stay on screen: the Jira and Linear forms of a first run no longer type into fields you can't see. In a narrow one, each value and its hint go under the label instead of being squeezed beside it.
+- An empty or relative `XDG_STATE_HOME` or `XDG_CONFIG_HOME` is ignored, as the XDG spec says, instead of putting taskman's folder in the current directory, where `taskman uninstall --purge` could then remove a folder of yours named `taskman`. `taskman uninstall --purge` also refuses a relative `TASKMAN_CONFIG`, and removes only full paths.
+- Saving tickets.json or config.json through a link (stow, home-manager) writes the file the link leads to and keeps the link, and a save keeps the file's permissions: a config.json kept readable by you only stays that way.
+- git, gh and token commands taskman runs can no longer reach its terminal. Before, ssh asking for a key's passphrase during a worktree's fetch printed its prompt over the screen again and again, took the keys you typed and used a full core until the time limit; now it fails at once, and the message says to add the key to ssh-agent with `ssh-add`.
+- Selecting a ticket marks its new comments and reviews read, whatever panels show; they keep their `●` until you leave it, and `ctrl+a m` takes it off. The sidebar card says where they are (`2 new on issue`, `1 new on PR`), and a comment once read no longer comes back as new after a refresh.
+- A session whose worktree was removed by hand, or whose project folder was moved, no longer starts in your home folder. Its pane and a toast say which folder is gone; Enter makes the worktree again on the ticket's branch, and `taskman resume` refuses too. A moved project folder no longer turns its PR panels off as "gh isn't installed".
+- `taskman add` and `taskman close` no longer say "taskman isn't running" now and then while it is. They checked how old taskman's heartbeat file was by the wall clock, and a clock that steps forward, as WSL's does every half minute or so, made a running taskman look closed. They now check the lock taskman holds while it runs.
+
 ## 0.1.26 - 2026-10-21
 
 - Settings → Help & feedback: each link's hint now lines up with the link above it, and the security link's label is just Security.
