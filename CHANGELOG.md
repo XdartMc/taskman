@@ -2,6 +2,13 @@
 
 What changed in each release; a release's notes on GitHub are its section here. What's merged but not released yet is in [changelog.d/](changelog.d/), a file for each change, which the release moves in here. Versions follow Cargo's rule for 0.x: the patch number (0.1.1) for anything compatible, fixes and new features alike, and the minor (0.2.0) for breaking changes, such as changed keys, config or saved-state format, or a removed command.
 
+## 0.1.28 - 2026-10-22
+
+- A ticket's new comments are counted in plain words: `3 new comments` on its sidebar card, and on an agent's board by where they are, naming the tracker: `2 new Jira comments`, `1 new PR comment`, or `2 new Jira comments, 1 on the PR`. With the tracker panel's comments hidden, a line where they'd be says how many there are and that `ctrl+a c` shows them.
+- `taskman status` now also strips variation selectors and zero-width characters, which can hide instructions in a title or comment, keeping the ones emoji need. A newline in a Local files file or column name no longer starts a line of its own in `taskman status` or `taskman move`.
+- A session waiting on Claude Code's or Codex's question about trusting its folder now shows as needing you, in the sidebar, the waiting list and notifications, instead of idle. A Codex approval request in a session continued with `taskman resume` shows as needing you again, instead of working until the next hook.
+- On Linux and WSL, taskman uses less processor time while a spinner shows or the selected session prints: it no longer polls the terminal over and over in the millisecond before each frame. Moving the mouse over taskman no longer redraws the screen.
+
 ## 0.1.27 - 2026-10-22
 
 - The dialog that approves an agent from `taskman add --agent` keeps its keys on screen on small terminals: a long role scrolls with ↑/↓ and says how many lines are hidden. Every line of the role has a `│` bar in front, so none can pass for taskman's own text, and approving after the command stopped waiting no longer says it was added "while taskman was closed".
