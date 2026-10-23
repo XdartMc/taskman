@@ -1,1 +1,0 @@
-- The install script's advice for putting taskman on your PATH now works for fish (`fish_add_path`) and for bash on macOS (`~/.bash_profile`, not `~/.bashrc`), so `taskman` is found in a new terminal.

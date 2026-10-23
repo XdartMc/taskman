@@ -1,1 +1,0 @@
-- On a project with a tracker, the Add form's Name hint says to set Type to Ticket for a ticket: a title typed while Type is Agent is the new agent's name, on Local files too.

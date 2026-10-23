@@ -2,6 +2,14 @@
 
 What changed in each release; a release's notes on GitHub are its section here. What's merged but not released yet is in [changelog.d/](changelog.d/), a file for each change, which the release moves in here. Versions follow Cargo's rule for 0.x: the patch number (0.1.1) for anything compatible, fixes and new features alike, and the minor (0.2.0) for breaking changes, such as changed keys, config or saved-state format, or a removed command.
 
+## 0.1.30 - 2026-10-24
+
+- On a project with a tracker, the Add form's Name hint says to set Type to Ticket for a ticket: a title typed while Type is Agent is the new agent's name, on Local files too.
+- The install script's advice for putting taskman on your PATH now works for fish (`fish_add_path`) and for bash on macOS (`~/.bash_profile`, not `~/.bashrc`), so `taskman` is found in a new terminal.
+- `ctrl+c` on a command such as `taskman status`, `taskman add` or `taskman update` now stops the `gh`, git and token commands it started, instead of leaving them running for up to their time limit; a SIGTERM or a closed terminal does the same. An interrupted `taskman update` no longer leaves the new binary's temporary copy beside the installed one. The command still ends as interrupted (exit status 130 for `ctrl+c`), so a script looping over commands stops. `taskman resume` leaves `ctrl+c` to the CLI it hands the terminal to, as before.
+- A taskman you built from source is now a development build wherever its build folder is, so `taskman update` no longer replaces it, nor `taskman uninstall` removes it, when `CARGO_TARGET_DIR` names a folder other than `target`.
+- When `taskman close` closes a ticket whose worktree is still being created, the footer keeps saying whether the worktree was removed or kept once git finishes, instead of that note being replaced at times by "Closed ENG-12".
+
 ## 0.1.29 - 2026-10-23
 
 - taskman refuses a command it doesn't know (`taskman stauts`) with exit code 2 and says `taskman --help` lists them, instead of starting; `taskman help` is `taskman --help`.
