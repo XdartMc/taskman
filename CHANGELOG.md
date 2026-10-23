@@ -2,6 +2,17 @@
 
 What changed in each release; a release's notes on GitHub are its section here. What's merged but not released yet is in [changelog.d/](changelog.d/), a file for each change, which the release moves in here. Versions follow Cargo's rule for 0.x: the patch number (0.1.1) for anything compatible, fixes and new features alike, and the minor (0.2.0) for breaking changes, such as changed keys, config or saved-state format, or a removed command.
 
+## 0.1.29 - 2026-10-23
+
+- taskman refuses a command it doesn't know (`taskman stauts`) with exit code 2 and says `taskman --help` lists them, instead of starting; `taskman help` is `taskman --help`.
+- Started straight after it was killed (`kill -9`, out of memory) or crashed, taskman starts and says the last one didn't quit cleanly, instead of saying another taskman is already running; one that's still running is refused as before, even when the state folder's `lock` file was removed.
+- With no terminal (`ssh host taskman` without `-t`), taskman says it needs one instead of "No such device or address", and a tickets.json that isn't text gets the same "move it aside" advice as other unreadable ones.
+- When a tracker can't be reached, its panel says why in plain words (no network, a name that doesn't resolve, no answer within 20 seconds, a failure on the tracker's side) and that taskman tries again, instead of the HTTP library's error. A `gh` that doesn't answer within 30 seconds is no longer reported as logged out, and helpers still running when taskman quits (gh, git, a token command) are stopped with it.
+- Idle, taskman wakes about 5 times a second instead of 20, and uses less processor time, which helps a laptop's battery: replies from its background work wake it as they come, rather than it checking for them ten times a second.
+- Reading a session's history (`ctrl+a l`, `ctrl+a v`, scrolling back) no longer keeps it at the pane's full width afterwards: one read took a session with 10,000 rows from 21 to 51 MB for good, and now leaves it at 21 MB.
+- An emoji widened by U+FE0F (⚠️ ❤️ ✔️) printed in a session's bottom-right cell no longer stops the session with "taskman stopped reading this session after an error" when the row above is printed to next.
+- Quitting while taskman's own git is running (checking a worktree before removing it, say) no longer leaves an `index.lock` behind that makes your next commit there fail: git is asked to stop and cleans up, and its read-only checks take no lock at all.
+
 ## 0.1.28 - 2026-10-22
 
 - A ticket's new comments are counted in plain words: `3 new comments` on its sidebar card, and on an agent's board by where they are, naming the tracker: `2 new Jira comments`, `1 new PR comment`, or `2 new Jira comments, 1 on the PR`. With the tracker panel's comments hidden, a line where they'd be says how many there are and that `ctrl+a c` shows them.
