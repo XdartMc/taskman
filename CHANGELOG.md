@@ -2,6 +2,13 @@
 
 What changed in each release; a release's notes on GitHub are its section here. What's merged but not released yet is in [changelog.d/](changelog.d/), a file for each change, which the release moves in here. Versions follow Cargo's rule for 0.x: the patch number (0.1.1) for anything compatible, fixes and new features alike, and the minor (0.2.0) for breaking changes, such as changed keys, config or saved-state format, or a removed command.
 
+## 0.1.31 - 2026-10-24
+
+- When `gh` doesn't answer within 30 seconds (a keyring locked at login, say), a project keeps the GitHub panel it had, now and at the next start, and Settings says the answer is from before until `ctrl+a r` gets a new one. A project with no GitHub remote keeps saying so, rather than that gh didn't answer.
+- Since 0.1.30, only taskman downloaded from a release updates itself. One built from source (`cargo build` and copied into `~/.local/bin`, say, or `cargo install --root ~/.local`), or installed by a package manager that builds it, only announces new releases, and `taskman uninstall` leaves it: update it the way it was installed, or switch to a release with the README's quick install. `taskman update` now says so in those words, rather than telling a package's user to `git pull` and rebuild.
+- A command started with a signal ignored keeps ignoring it, as before 0.1.30: `nohup taskman update`, or `taskman status &` from a script, carries on when the terminal closes or `ctrl+c` is pressed, instead of ending.
+- With a state folder shared between machines (a network folder), a second taskman on one machine no longer starts beside one running on the other, and says which machine that is; `taskman add` and `taskman close` there wait for the running one's reply rather than saying taskman isn't running.
+
 ## 0.1.30 - 2026-10-24
 
 - On a project with a tracker, the Add form's Name hint says to set Type to Ticket for a ticket: a title typed while Type is Agent is the new agent's name, on Local files too.
